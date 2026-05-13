@@ -1,0 +1,6 @@
+pytesseract
+Pillow
+PyMuPDF
+pypdf
+ocrmypdf
+pyinstaller
