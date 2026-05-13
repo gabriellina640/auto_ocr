@@ -22,7 +22,6 @@ APP_NAME = "Auto OCR PDF"
 APP_VERSION = "1.2.0"
 DEFAULT_LANGUAGE = "por"
 DEFAULT_DPI = 400
-DEFAULT_TESSERACT_CONFIG = "--psm 3 -c preserve_interword_spaces=1"
 PAGE_SIZE_TOLERANCE = 2.0
 
 COLOR_BG = "#f6f8fb"
@@ -227,6 +226,71 @@ def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     return image
 
 
+def run_tesseract_pdf(image: Image.Image, output_base: Path, language: str, dpi: int) -> Path:
+    image_path = output_base.with_suffix(".png")
+    output_pdf = output_base.with_suffix(".pdf")
+
+    image.save(
+        image_path,
+        format="PNG",
+        dpi=(dpi, dpi),
+    )
+
+    command = [
+        pytesseract.pytesseract.tesseract_cmd or "tesseract",
+        str(image_path),
+        str(output_base),
+        "-l",
+        language,
+        "--psm",
+        "3",
+        "-c",
+        "preserve_interword_spaces=1",
+        "pdf",
+    ]
+
+    env = os.environ.copy()
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        env=env,
+    )
+
+    stderr = result.stderr.decode(errors="replace").strip()
+    stdout = result.stdout.decode(errors="replace").strip()
+
+    cli_detail = stderr or stdout or "sem detalhe tecnico"
+    if output_pdf.exists() and output_pdf.stat().st_size > 0:
+        try:
+            PdfReader(str(output_pdf))
+            return output_pdf
+        except Exception as e:
+            cli_detail = f"PDF OCR gerado pelo CLI estava invalido: {e}. {cli_detail}"
+            output_pdf.unlink(missing_ok=True)
+
+    try:
+        pdf_bytes = pytesseract.image_to_pdf_or_hocr(
+            image,
+            extension="pdf",
+            lang=language,
+            config="--psm 3 -c preserve_interword_spaces=1",
+        )
+        output_pdf.write_bytes(pdf_bytes)
+        PdfReader(str(output_pdf))
+        return output_pdf
+    except Exception as e:
+        output_pdf.unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Tesseract nao conseguiu gerar PDF OCR. "
+                f"CLI: {cli_detail}. Fallback pytesseract: {e}"
+            ) from e
+        raise RuntimeError(
+            "Tesseract terminou sem gerar um PDF OCR valido. "
+            f"CLI: {cli_detail}. Fallback pytesseract: {e}"
+        ) from e
+
+
 def make_temp_output_path(output_pdf: Path) -> Path:
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(
@@ -341,15 +405,13 @@ def run_compatibility_mode(
             image = pil_image_from_pixmap(pix, dpi)
 
             progress_callback(f"Aplicando OCR na pagina {page_number} de {total_pages}...")
-            pdf_bytes = pytesseract.image_to_pdf_or_hocr(
-                image,
-                extension="pdf",
-                lang=language,
-                config=DEFAULT_TESSERACT_CONFIG,
+            temp_page_base = temp_dir / f"page_{page_number:05d}"
+            temp_page_pdf = run_tesseract_pdf(
+                image=image,
+                output_base=temp_page_base,
+                language=language,
+                dpi=dpi,
             )
-
-            temp_page_pdf = temp_dir / f"page_{page_number:05d}.pdf"
-            temp_page_pdf.write_bytes(pdf_bytes)
 
             reader = PdfReader(str(temp_page_pdf))
             ocr_page = reader.pages[0]

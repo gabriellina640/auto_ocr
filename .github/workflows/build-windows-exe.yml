@@ -45,6 +45,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "vendor\tessdata" | Out-Null
 
           Copy-Item "$tesseractRoot\*" "vendor\tesseract" -Recurse -Force
+          Copy-Item "$tesseractRoot\tessdata\*" "vendor\tessdata" -Recurse -Force
 
           Invoke-WebRequest `
             -Uri "https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata" `
@@ -56,6 +57,37 @@ jobs:
 
           .\vendor\tesseract\tesseract.exe --version
           .\vendor\tesseract\tesseract.exe --list-langs --tessdata-dir .\vendor\tessdata
+
+      - name: Smoke test embedded Tesseract PDF output
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+
+          New-Item -ItemType Directory -Force -Path "tesseract_smoke" | Out-Null
+          $imagePath = "tesseract_smoke\input.tif"
+          $outputBase = "tesseract_smoke\output"
+          $bitmap = New-Object System.Drawing.Bitmap 1240, 1754
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.Clear([System.Drawing.Color]::White)
+          $font = New-Object System.Drawing.Font "Arial", 42
+          $brush = [System.Drawing.Brushes]::Black
+          $graphics.DrawString("AUTO OCR TESTE WINDOWS", $font, $brush, 120, 180)
+          $graphics.DrawString("Processo 12345-67.2026.8.01.0001", $font, $brush, 120, 260)
+          $bitmap.SetResolution(400, 400)
+          $bitmap.Save($imagePath, [System.Drawing.Imaging.ImageFormat]::Tiff)
+          $graphics.Dispose()
+          $bitmap.Dispose()
+
+          & .\vendor\tesseract\tesseract.exe $imagePath $outputBase -l por --psm 3 -c preserve_interword_spaces=1 --tessdata-dir .\vendor\tessdata pdf
+          $tesseractExitCode = $LASTEXITCODE
+
+          if (!(Test-Path "$outputBase.pdf")) {
+            throw "Tesseract did not generate PDF output."
+          }
+
+          if ($tesseractExitCode -ne 0) {
+            Write-Warning "Tesseract returned exit code $tesseractExitCode, but PDF output was generated. The app validation will verify the file."
+          }
 
       - name: Smoke test OCR logic
         shell: pwsh
