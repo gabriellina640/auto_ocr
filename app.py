@@ -19,23 +19,26 @@ from pypdf import PdfWriter, PdfReader
 
 
 APP_NAME = "Auto OCR PDF"
-APP_VERSION = "1.1.0"
-DEFAULT_DPI = 300
+APP_VERSION = "1.2.0"
+DEFAULT_LANGUAGE = "por"
+DEFAULT_DPI = 400
 DEFAULT_TESSERACT_CONFIG = "--psm 3 -c preserve_interword_spaces=1"
 PAGE_SIZE_TOLERANCE = 2.0
 
 COLOR_BG = "#f6f8fb"
 COLOR_CARD = "#ffffff"
-COLOR_CARD_ALT = "#eef6ff"
+COLOR_CARD_ALT = "#ecfeff"
 COLOR_BORDER = "#d8e0ea"
 COLOR_PRIMARY = "#2563eb"
 COLOR_PRIMARY_DARK = "#1d4ed8"
-COLOR_SUCCESS = "#16a34a"
+COLOR_SUCCESS = "#15803d"
+COLOR_SUCCESS_DARK = "#166534"
 COLOR_WARNING = "#f59e0b"
 COLOR_TEXT = "#111827"
 COLOR_MUTED = "#64748b"
 COLOR_LOG_BG = "#0f172a"
 COLOR_LOG_TEXT = "#e5e7eb"
+COLOR_CYAN = "#0e7490"
 
 
 @dataclass(frozen=True)
@@ -75,10 +78,6 @@ def resource_base_dir() -> Path:
 
 def bundled_resource(*parts: str) -> Path:
     return resource_base_dir().joinpath(*parts)
-
-
-def find_executable(name: str) -> str | None:
-    return shutil.which(name)
 
 
 def open_file(path: Path):
@@ -219,38 +218,6 @@ def check_tesseract(language: str = "por") -> tuple[bool, str]:
     )
 
 
-def find_ocrmypdf_command() -> str | None:
-    candidates = [
-        bundled_resource("vendor", "ocrmypdf", "ocrmypdf.exe"),
-        app_base_dir() / "vendor" / "ocrmypdf" / "ocrmypdf.exe",
-        app_base_dir() / "venv" / ("Scripts" if is_windows() else "bin") / ("ocrmypdf.exe" if is_windows() else "ocrmypdf"),
-    ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    return find_executable("ocrmypdf")
-
-
-def check_ocrmypdf() -> tuple[bool, str]:
-    found = find_ocrmypdf_command()
-
-    if not found:
-        return False, "OCRmyPDF nao encontrado. O modo preservacao e opcional."
-
-    try:
-        result = subprocess.run(
-            [found, "--version"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return True, f"OCRmyPDF OK: {found} | versao {result.stdout.strip()}"
-    except Exception as e:
-        return False, f"OCRmyPDF encontrado, mas falhou ao executar: {e}"
-
-
 def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     if pix.alpha:
         pix = fitz.Pixmap(fitz.csRGB, pix)
@@ -333,61 +300,6 @@ def publish_validated_pdf(input_pdf: Path, temp_pdf: Path, output_pdf: Path) -> 
 # ============================================================
 # PROCESSAMENTO OCR
 # ============================================================
-
-def run_ocrmypdf_preservation_mode(
-    input_pdf: Path,
-    output_pdf: Path,
-    language: str,
-    progress_callback,
-) -> PdfValidationReport:
-    """
-    Modo preservacao:
-    Usa OCRmyPDF para tentar manter a estrutura original.
-    Pode falhar em PDFs assinados/protegidos.
-    """
-    progress_callback("Iniciando modo preservacao...")
-    ocrmypdf = find_ocrmypdf_command()
-    if not ocrmypdf:
-        raise RuntimeError("OCRmyPDF nao encontrado para o modo preservacao.")
-
-    temp_output = make_temp_output_path(output_pdf)
-
-    command = [
-        ocrmypdf,
-        "--language",
-        language,
-        "--skip-text",
-        "--output-type",
-        "pdf",
-        str(input_pdf),
-        str(temp_output),
-    ]
-
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            error_text = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(
-                "O modo preservacao nao conseguiu processar este PDF.\n\n"
-                "Isso pode acontecer com PDF assinado, protegido ou gerado pelo SAJ.\n\n"
-                "Use o modo compatibilidade segura.\n\n"
-                f"Detalhe tecnico:\n{error_text}"
-            )
-
-        progress_callback("Validando PDF final...")
-        report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
-        progress_callback("PDF OCR criado e validado com sucesso.")
-        return report
-
-    finally:
-        if temp_output.exists():
-            temp_output.unlink(missing_ok=True)
-
 
 def run_compatibility_mode(
     input_pdf: Path,
@@ -474,8 +386,8 @@ class AutoOCRApp:
         self.root = root
 
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1040x700")
-        self.root.minsize(960, 660)
+        self.root.geometry("980x720")
+        self.root.minsize(720, 620)
         self.root.configure(bg=COLOR_BG)
 
         self.selected_pdf: Path | None = None
@@ -485,10 +397,6 @@ class AutoOCRApp:
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.progress_queue: queue.Queue[int] = queue.Queue()
-
-        self.language_var = tk.StringVar(value="por")
-        self.mode_var = tk.StringVar(value="compat")
-        self.dpi_var = tk.StringVar(value=str(DEFAULT_DPI))
 
         self.setup_style()
         self.create_layout()
@@ -518,13 +426,9 @@ class AutoOCRApp:
         style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"), background=COLOR_CARD, foreground=COLOR_TEXT)
         style.configure("Success.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_SUCCESS)
         style.configure("Warning.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_WARNING)
-        style.configure("Primary.TButton", font=button_font, padding=(12, 9))
-        style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_DARK)])
+        style.configure("Primary.TButton", font=button_font, padding=(14, 10))
         style.configure("Secondary.TButton", padding=(10, 7))
         style.configure("TProgressbar", troughcolor="#dbeafe", background=COLOR_PRIMARY, bordercolor="#dbeafe")
-        style.configure("TRadiobutton", background=COLOR_CARD, foreground=COLOR_TEXT)
-        style.configure("TEntry", fieldbackground="#ffffff")
-        style.configure("TCombobox", fieldbackground="#ffffff")
 
     # --------------------------------------------------------
 
@@ -546,6 +450,31 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
+    def make_action_button(self, parent, text: str, command, primary: bool = False) -> tk.Button:
+        bg = COLOR_PRIMARY if primary else "#e2e8f0"
+        fg = "#ffffff" if primary else COLOR_TEXT
+        active_bg = COLOR_PRIMARY_DARK if primary else "#cbd5e1"
+
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=active_bg,
+            activeforeground=fg,
+            disabledforeground="#94a3b8",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            borderwidth=0,
+            padx=16,
+            pady=10,
+            cursor="hand2",
+            wraplength=260,
+        )
+
+    # --------------------------------------------------------
+
     def create_layout(self):
         main = tk.Frame(self.root, bg=COLOR_BG)
         main.pack(fill="both", expand=True, padx=26, pady=24)
@@ -553,31 +482,43 @@ class AutoOCRApp:
         header = tk.Frame(main, bg=COLOR_BG)
         header.pack(fill="x")
 
+        badge = tk.Label(
+            header,
+            text="SAJ OCR",
+            bg=COLOR_SUCCESS,
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            padx=10,
+            pady=4,
+        )
+        badge.pack(anchor="w", pady=(0, 8))
+
         title = ttk.Label(header, text="Auto OCR PDF", style="Title.TLabel")
         title.pack(anchor="w")
 
         subtitle = ttk.Label(
             header,
-            text="Converta PDFs escaneados em arquivos pesquisaveis, selecionaveis e validados.",
+            text="Selecione o PDF do SAJ. O app gera uma copia fiel, pesquisavel e validada.",
             style="Subtitle.TLabel",
         )
         subtitle.pack(anchor="w", pady=(4, 0))
 
         content = tk.Frame(main, bg=COLOR_BG)
         content.pack(fill="both", expand=True, pady=(22, 0))
+        content.grid_columnconfigure(0, weight=3, minsize=360)
+        content.grid_columnconfigure(1, weight=1, minsize=240)
+        content.grid_rowconfigure(0, weight=1)
 
         left = tk.Frame(content, bg=COLOR_BG)
-        left.pack(side="left", fill="both", expand=True)
+        left.grid(row=0, column=0, sticky="nsew")
 
-        right = tk.Frame(content, bg=COLOR_BG, width=330)
-        right.pack(side="right", fill="y", padx=(22, 0))
-        right.pack_propagate(False)
+        right = tk.Frame(content, bg=COLOR_BG)
+        right.grid(row=0, column=1, sticky="nsew", padx=(22, 0))
 
         self.create_file_card(left)
         self.create_progress_card(left)
         self.create_log_card(left)
 
-        self.create_options_card(right)
         self.create_validation_card(right)
         self.create_actions_card(right)
         self.create_help_card(right)
@@ -585,14 +526,14 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def create_file_card(self, parent):
-        card = self.make_card(parent, "PDF de entrada", fill="x")
+        card = self.make_card(parent, "Entrada", fill="x")
 
         upload_area = tk.Frame(
             card,
             bg=COLOR_CARD_ALT,
-            highlightbackground="#bfdbfe",
+            highlightbackground="#67e8f9",
             highlightthickness=1,
-            height=154,
+            height=190,
         )
         upload_area.pack(fill="x", padx=18, pady=(4, 18))
         upload_area.pack_propagate(False)
@@ -601,16 +542,16 @@ class AutoOCRApp:
             upload_area,
             text="PDF",
             font=("Segoe UI", 18, "bold"),
-            bg=COLOR_PRIMARY,
+            bg=COLOR_CYAN,
             fg="#ffffff",
             width=5,
             height=1,
         )
-        icon.pack(pady=(20, 8))
+        icon.pack(pady=(22, 8))
 
         self.file_title_label = tk.Label(
             upload_area,
-            text="Nenhum PDF selecionado",
+            text="Selecione o PDF do SAJ",
             font=("Segoe UI", 12, "bold"),
             bg=COLOR_CARD_ALT,
             fg=COLOR_TEXT,
@@ -619,109 +560,21 @@ class AutoOCRApp:
 
         self.file_path_label = tk.Label(
             upload_area,
-            text="Escolha um arquivo PDF para gerar uma copia OCR sem alterar o original.",
+            text="Escolha o PDF do SAJ para gerar uma copia pesquisavel sem alterar o original.",
             font=("Segoe UI", 9),
             bg=COLOR_CARD_ALT,
             fg=COLOR_MUTED,
-            wraplength=620,
+            wraplength=680,
         )
         self.file_path_label.pack(pady=(5, 12))
 
-        buttons = tk.Frame(upload_area, bg=COLOR_CARD_ALT)
-        buttons.pack()
-
-        self.btn_select = ttk.Button(
-            buttons,
-            text="Selecionar PDF",
+        self.btn_select = self.make_action_button(
+            upload_area,
+            text="Selecionar PDF do SAJ",
             command=self.select_pdf,
-            style="Primary.TButton",
+            primary=True,
         )
-        self.btn_select.pack(side="left", padx=4)
-
-        self.btn_clear = ttk.Button(
-            buttons,
-            text="Limpar",
-            command=self.clear_pdf,
-            state="disabled",
-            style="Secondary.TButton",
-        )
-        self.btn_clear.pack(side="left", padx=4)
-
-    # --------------------------------------------------------
-
-    def create_options_card(self, parent):
-        card = self.make_card(parent, "Configuracoes", fill="x")
-
-        mode_label = ttk.Label(card, text="Modo de processamento", style="CardText.TLabel")
-        mode_label.pack(anchor="w", padx=18, pady=(2, 6))
-
-        rb_compat = ttk.Radiobutton(
-            card,
-            text="Compatibilidade segura",
-            variable=self.mode_var,
-            value="compat",
-        )
-        rb_compat.pack(anchor="w", padx=18)
-
-        compat_hint = ttk.Label(
-            card,
-            text="Recomendado para SAJ, digitalizados, assinados ou bloqueados para copia.",
-            wraplength=280,
-            style="Hint.TLabel",
-        )
-        compat_hint.pack(anchor="w", padx=38, pady=(0, 10))
-
-        rb_preserve = ttk.Radiobutton(
-            card,
-            text="Preservacao maxima",
-            variable=self.mode_var,
-            value="preserve",
-        )
-        rb_preserve.pack(anchor="w", padx=18)
-
-        preserve_hint = ttk.Label(
-            card,
-            text="Tenta manter estrutura original. Exige OCRmyPDF e pode falhar em PDF protegido.",
-            wraplength=280,
-            style="Hint.TLabel",
-        )
-        preserve_hint.pack(anchor="w", padx=38, pady=(0, 14))
-
-        separator = tk.Frame(card, bg=COLOR_BORDER, height=1)
-        separator.pack(fill="x", padx=18, pady=(0, 12))
-
-        lang_label = ttk.Label(card, text="Idioma do OCR", style="CardText.TLabel")
-        lang_label.pack(anchor="w", padx=18, pady=(0, 4))
-
-        lang_entry = ttk.Entry(card, textvariable=self.language_var)
-        lang_entry.pack(fill="x", padx=18)
-
-        lang_hint = ttk.Label(
-            card,
-            text="Portugues: por | Portugues + Ingles: por+eng",
-            wraplength=280,
-            style="Hint.TLabel",
-        )
-        lang_hint.pack(anchor="w", padx=18, pady=(4, 12))
-
-        dpi_label = ttk.Label(card, text="Qualidade visual", style="CardText.TLabel")
-        dpi_label.pack(anchor="w", padx=18, pady=(0, 4))
-
-        dpi_combo = ttk.Combobox(
-            card,
-            textvariable=self.dpi_var,
-            values=["200", "300", "400", "500"],
-            state="readonly",
-        )
-        dpi_combo.pack(fill="x", padx=18)
-
-        dpi_hint = ttk.Label(
-            card,
-            text="300 e o equilibrio recomendado. 400/500 melhora imagem e aumenta tamanho.",
-            wraplength=280,
-            style="Hint.TLabel",
-        )
-        dpi_hint.pack(anchor="w", padx=18, pady=(4, 18))
+        self.btn_select.pack(pady=(0, 4), ipadx=6)
 
     # --------------------------------------------------------
 
@@ -753,11 +606,11 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def create_validation_card(self, parent):
-        card = self.make_card(parent, "Validacao", fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Garantia", fill="x")
 
         self.validation_status_label = ttk.Label(
             card,
-            text="Aguardando processamento",
+            text="Pronto para receber um PDF",
             style="Hint.TLabel",
             wraplength=280,
         )
@@ -766,34 +619,25 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def create_actions_card(self, parent):
-        card = self.make_card(parent, "Acoes", fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Resultado", fill="x", pady=(18, 0))
 
-        self.btn_process = ttk.Button(
+        self.btn_open_pdf = self.make_action_button(
             card,
-            text="Gerar PDF pesquisavel",
-            command=self.start_processing,
-            state="disabled",
-            style="Primary.TButton",
-        )
-        self.btn_process.pack(fill="x", padx=18, pady=(0, 10))
-
-        self.btn_open_pdf = ttk.Button(
-            card,
-            text="Abrir PDF final",
+            text="Abrir PDF pesquisavel",
             command=self.open_output_pdf,
-            state="disabled",
-            style="Secondary.TButton",
+            primary=False,
         )
-        self.btn_open_pdf.pack(fill="x", padx=18, pady=4)
+        self.btn_open_pdf.config(state="disabled")
+        self.btn_open_pdf.pack(fill="x", padx=18, pady=(0, 8))
 
-        self.btn_open_folder = ttk.Button(
+        self.btn_open_folder = self.make_action_button(
             card,
-            text="Abrir pasta do resultado",
+            text="Abrir pasta",
             command=self.open_output_folder,
-            state="disabled",
-            style="Secondary.TButton",
+            primary=False,
         )
-        self.btn_open_folder.pack(fill="x", padx=18, pady=(4, 18))
+        self.btn_open_folder.config(state="disabled")
+        self.btn_open_folder.pack(fill="x", padx=18, pady=(0, 18))
 
     # --------------------------------------------------------
 
@@ -802,8 +646,8 @@ class AutoOCRApp:
 
         text = (
             "O arquivo original nao e alterado.\n\n"
-            "A saida so e publicada depois de abrir, conferir paginas e validar texto pesquisavel.\n\n"
-            "PDFs assinados podem perder a assinatura na copia OCR."
+            "Ao selecionar o PDF, o processamento comeca automaticamente.\n\n"
+            "A copia so e liberada depois de conferir paginas, tamanho e texto pesquisavel."
         )
 
         label = ttk.Label(
@@ -852,34 +696,13 @@ class AutoOCRApp:
         self.file_title_label.config(text=self.selected_pdf.name)
         self.file_path_label.config(text=str(self.selected_pdf))
 
-        self.btn_clear.config(state="normal")
-        self.btn_process.config(state="normal")
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
 
         self.set_progress(0)
-        self.set_validation_status("Aguardando processamento", warning=False)
+        self.set_validation_status("PDF recebido. Iniciando processamento...", warning=False)
         self.log(f"PDF selecionado: {self.selected_pdf}")
-
-    # --------------------------------------------------------
-
-    def clear_pdf(self):
-        self.selected_pdf = None
-        self.output_pdf = None
-        self.last_report = None
-
-        self.file_title_label.config(text="Nenhum PDF selecionado")
-        self.file_path_label.config(text="Escolha um arquivo PDF para gerar uma copia OCR sem alterar o original.")
-
-        self.btn_clear.config(state="disabled")
-        self.btn_process.config(state="disabled")
-        self.btn_open_pdf.config(state="disabled")
-        self.btn_open_folder.config(state="disabled")
-
-        self.set_progress(0)
-        self.set_status("Aguardando selecao do PDF...")
-        self.set_validation_status("Aguardando processamento", warning=False)
-        self.log("Selecao limpa.")
+        self.root.after(100, self.start_processing)
 
     # --------------------------------------------------------
 
@@ -893,33 +716,11 @@ class AutoOCRApp:
         if self.selected_pdf.suffix.lower() != ".pdf":
             return False, "O arquivo selecionado precisa ser um PDF."
 
-        language = self.language_var.get().strip()
-
-        if not language:
-            return False, "Informe o idioma do OCR. Exemplo: por"
-
-        try:
-            dpi = int(self.dpi_var.get().strip())
-            if dpi < 100 or dpi > 600:
-                return False, "Use um DPI entre 100 e 600."
-        except ValueError:
-            return False, "DPI invalido. Use um numero, exemplo: 300."
-
-        ok_tess, msg_tess = check_tesseract(language)
+        ok_tess, msg_tess = check_tesseract(DEFAULT_LANGUAGE)
         self.log(msg_tess)
 
         if not ok_tess:
             return False, msg_tess
-
-        if self.mode_var.get() == "preserve":
-            ok_ocr, msg_ocr = check_ocrmypdf()
-            self.log(msg_ocr)
-
-            if not ok_ocr:
-                return False, (
-                    "OCRmyPDF nao encontrado.\n\n"
-                    "Use o modo compatibilidade segura ou integre o OCRmyPDF ao pacote."
-                )
 
         return True, "OK"
 
@@ -932,11 +733,10 @@ class AutoOCRApp:
             messagebox.showerror("Atencao", message)
             return
 
-        self.btn_process.config(state="disabled")
         self.btn_select.config(state="disabled")
-        self.btn_clear.config(state="disabled")
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
+        self.btn_select.config(text="Processando PDF...")
 
         self.last_report = None
         self.set_progress(0)
@@ -961,38 +761,19 @@ class AutoOCRApp:
             output_pdf = safe_output_path(input_pdf)
             self.output_pdf = output_pdf
 
-            language = self.language_var.get().strip()
-            mode = self.mode_var.get()
-
-            try:
-                dpi = int(self.dpi_var.get().strip())
-            except ValueError:
-                dpi = DEFAULT_DPI
-
             self.log(f"Arquivo de entrada: {input_pdf}")
             self.log(f"Arquivo de saida: {output_pdf}")
-            self.log(f"Idioma OCR: {language}")
-            self.log(f"Modo: {'Compatibilidade segura' if mode == 'compat' else 'Preservacao maxima'}")
+            self.log("Processamento: fidelidade alta para PDF do SAJ")
+            self.log(f"Qualidade interna: {DEFAULT_DPI} DPI")
 
-            if mode == "preserve":
-                self.progress_queue.put(10)
-                report = run_ocrmypdf_preservation_mode(
-                    input_pdf=input_pdf,
-                    output_pdf=output_pdf,
-                    language=language,
-                    progress_callback=self.log,
-                )
-                self.progress_queue.put(100)
-
-            else:
-                report = run_compatibility_mode(
-                    input_pdf=input_pdf,
-                    output_pdf=output_pdf,
-                    language=language,
-                    dpi=dpi,
-                    progress_callback=self.log,
-                    progress_percent_callback=lambda value: self.progress_queue.put(value),
-                )
+            report = run_compatibility_mode(
+                input_pdf=input_pdf,
+                output_pdf=output_pdf,
+                language=DEFAULT_LANGUAGE,
+                dpi=DEFAULT_DPI,
+                progress_callback=self.log,
+                progress_percent_callback=lambda value: self.progress_queue.put(value),
+            )
 
             self.last_report = report
             self.log(
@@ -1047,10 +828,7 @@ class AutoOCRApp:
 
     def finish_processing(self):
         self.btn_select.config(state="normal")
-
-        if self.selected_pdf is not None:
-            self.btn_clear.config(state="normal")
-            self.btn_process.config(state="normal")
+        self.btn_select.config(text="Selecionar outro PDF")
 
     # --------------------------------------------------------
 

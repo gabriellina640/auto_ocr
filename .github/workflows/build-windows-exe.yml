@@ -89,8 +89,8 @@ jobs:
           report = app.run_compatibility_mode(
               input_pdf=input_pdf,
               output_pdf=output_pdf,
-              language="por",
-              dpi=200,
+              language=app.DEFAULT_LANGUAGE,
+              dpi=app.DEFAULT_DPI,
               progress_callback=lambda _: None,
               progress_percent_callback=lambda _: None,
           )
