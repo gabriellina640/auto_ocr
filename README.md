@@ -1,61 +1,79 @@
-OCR DE PDF PESQUISÁVEL
+AUTO OCR PDF
 
-Este programa cria uma cópia OCR de um PDF.
-Ele não altera o arquivo original.
+Cria uma copia OCR de um PDF sem alterar o arquivo original.
 
-Resultado:
+Entrada:
 arquivo.pdf
+
+Saida:
 arquivo_OCR.pdf
 
-O arquivo _OCR.pdf terá camada de texto pesquisável/selecionável.
+O PDF final recebe camada de texto pesquisavel/selecionavel e passa por validacao tecnica antes de ser liberado.
 
-REQUISITOS
+MODOS
 
-1. Python instalado
-2. Tesseract OCR instalado
-3. Idioma português instalado no Tesseract
-4. Opcional: OCRmyPDF e Ghostscript para o modo preservação
+1. Compatibilidade segura
 
-INSTALAÇÃO DO TESSERACT
+Modo recomendado para PDFs escaneados, SAJ, assinados ou bloqueados para copia.
+Ele renderiza cada pagina como imagem, aplica OCR e recria o PDF preservando quantidade e tamanho das paginas.
 
-No Windows, instale o Tesseract OCR.
-Durante a instalação, marque a opção de adicionar ao PATH.
+Observacao: a copia OCR pode perder assinatura digital, links, marcadores, formularios e metadados do PDF original.
 
-Também instale o pacote de idioma português, chamado "por".
+2. Preservacao maxima
 
-TESTAR O PROGRAMA
+Usa OCRmyPDF quando disponivel.
+Tenta manter melhor a estrutura original, mas pode falhar em PDFs protegidos, assinados ou problemáticos.
 
-Clique duas vezes em:
+VALIDACOES DO APP
 
-run_dev.bat
+Antes de publicar o resultado, o app confere:
 
-GERAR EXE
+- PDF final existe e pode ser aberto
+- quantidade de paginas nao mudou
+- tamanho das paginas foi preservado dentro de tolerancia
+- existe texto pesquisavel extraivel no PDF final
 
-Clique duas vezes em:
+Se a validacao falhar, o PDF temporario nao substitui o resultado final.
 
-build.bat
+EXE WINDOWS INTEGRADO
 
-O executável final ficará em:
+O EXE Windows e gerado pelo GitHub Actions.
 
-dist\OCR_PDF.exe
+Quando o projeto estiver no GitHub, abra a aba Actions e rode:
 
-MODOS DO PROGRAMA
+Build Windows EXE
 
-1. Compatibilidade SAJ / PDF problemático
+O workflow gera o arquivo:
 
-Este modo renderiza cada página como imagem e aplica OCR por cima.
-É o modo recomendado para PDF do SAJ, assinado ou com bloqueio de cópia.
-Ele preserva o conteúdo visual, mas gera uma nova cópia sem preservar assinatura digital.
+AutoOCRPDF-Windows
 
-2. Preservação máxima
+Dentro do artifact fica:
 
-Este modo usa OCRmyPDF.
-Ele tenta manter a estrutura original do PDF.
-Pode falhar em PDFs assinados, protegidos ou problemáticos.
+AutoOCRPDF.exe
 
-OBSERVAÇÃO IMPORTANTE
+Esse EXE ja e gerado com Tesseract e idioma portugues embutidos pelo proprio workflow.
 
-O programa não remove senha, não quebra proteção, não desbloqueia assinatura
-e não altera o PDF original.
+IMPORTANTE SOBRE DEPENDENCIAS
 
-Ele cria uma cópia visualmente equivalente com OCR.
+O modo compatibilidade segura depende de:
+
+- Python durante o build no GitHub Actions
+- PyInstaller durante o build no GitHub Actions
+- Tesseract embutido no EXE pelo workflow
+- arquivo por.traineddata embutido no EXE pelo workflow
+
+O modo preservacao maxima tambem depende de OCRmyPDF, Ghostscript e qpdf.
+Para distribuicao simples em Windows, trate esse modo como opcional.
+
+DESENVOLVIMENTO LOCAL
+
+python3 -m pip install -r requirements.txt
+python3 app.py
+
+SEGURANCA
+
+- O original nunca e sobrescrito.
+- O resultado e salvo com sufixo _OCR.
+- Se ja existir, o app adiciona timestamp.
+- O app nao remove senha, nao quebra protecao e nao desbloqueia assinatura.
+- PDFs assinados podem gerar uma copia visual com OCR, mas a assinatura digital nao permanece valida nessa copia.

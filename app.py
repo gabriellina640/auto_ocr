@@ -2,8 +2,10 @@ import os
 import sys
 import shutil
 import queue
+import tempfile
 import threading
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 
@@ -17,12 +19,34 @@ from pypdf import PdfWriter, PdfReader
 
 
 APP_NAME = "Auto OCR PDF"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 DEFAULT_DPI = 300
+DEFAULT_TESSERACT_CONFIG = "--psm 3 -c preserve_interword_spaces=1"
+PAGE_SIZE_TOLERANCE = 2.0
+
+COLOR_BG = "#f6f8fb"
+COLOR_CARD = "#ffffff"
+COLOR_CARD_ALT = "#eef6ff"
+COLOR_BORDER = "#d8e0ea"
+COLOR_PRIMARY = "#2563eb"
+COLOR_PRIMARY_DARK = "#1d4ed8"
+COLOR_SUCCESS = "#16a34a"
+COLOR_WARNING = "#f59e0b"
+COLOR_TEXT = "#111827"
+COLOR_MUTED = "#64748b"
+COLOR_LOG_BG = "#0f172a"
+COLOR_LOG_TEXT = "#e5e7eb"
+
+
+@dataclass(frozen=True)
+class PdfValidationReport:
+    pages: int
+    pages_with_text: int
+    warnings: list[str]
 
 
 # ============================================================
-# UTILITÁRIOS
+# UTILITARIOS
 # ============================================================
 
 def is_windows() -> bool:
@@ -31,6 +55,26 @@ def is_windows() -> bool:
 
 def is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_base_dir() -> Path:
+    if is_frozen_app():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def resource_base_dir() -> Path:
+    if is_frozen_app() and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS).resolve()
+    return app_base_dir()
+
+
+def bundled_resource(*parts: str) -> Path:
+    return resource_base_dir().joinpath(*parts)
 
 
 def find_executable(name: str) -> str | None:
@@ -42,11 +86,11 @@ def open_file(path: Path):
         if is_windows():
             os.startfile(path)
         elif is_macos():
-            subprocess.run(["open", str(path)])
+            subprocess.run(["open", str(path)], check=False)
         else:
-            subprocess.run(["xdg-open", str(path)])
+            subprocess.run(["xdg-open", str(path)], check=False)
     except Exception as e:
-        messagebox.showerror("Erro", f"Não foi possível abrir o arquivo:\n\n{e}")
+        messagebox.showerror("Erro", f"Nao foi possivel abrir o arquivo:\n\n{e}")
 
 
 def open_folder(path: Path):
@@ -56,11 +100,11 @@ def open_folder(path: Path):
         if is_windows():
             os.startfile(folder)
         elif is_macos():
-            subprocess.run(["open", str(folder)])
+            subprocess.run(["open", str(folder)], check=False)
         else:
-            subprocess.run(["xdg-open", str(folder)])
+            subprocess.run(["xdg-open", str(folder)], check=False)
     except Exception as e:
-        messagebox.showerror("Erro", f"Não foi possível abrir a pasta:\n\n{e}")
+        messagebox.showerror("Erro", f"Nao foi possivel abrir a pasta:\n\n{e}")
 
 
 def safe_output_path(input_pdf: Path) -> Path:
@@ -73,25 +117,69 @@ def safe_output_path(input_pdf: Path) -> Path:
     return input_pdf.with_name(f"{input_pdf.stem}_OCR_{timestamp}.pdf")
 
 
-def check_tesseract() -> tuple[bool, str]:
+def split_languages(language: str) -> list[str]:
+    return [item.strip() for item in language.split("+") if item.strip()]
+
+
+def bundled_tesseract_candidates() -> list[Path]:
+    if is_windows():
+        names = ["tesseract.exe"]
+    else:
+        names = ["tesseract"]
+
+    candidates: list[Path] = []
+    for name in names:
+        candidates.append(bundled_resource("vendor", "tesseract", name))
+        candidates.append(app_base_dir() / "vendor" / "tesseract" / name)
+    return candidates
+
+
+def configure_tessdata_prefix() -> Path | None:
+    candidates = [
+        bundled_resource("vendor", "tessdata"),
+        app_base_dir() / "vendor" / "tessdata",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            os.environ["TESSDATA_PREFIX"] = str(candidate)
+            return candidate
+
+    return None
+
+
+def check_tesseract(language: str = "por") -> tuple[bool, str]:
     """
-    Procura o Tesseract em caminhos comuns.
-    Compatível com:
-    - macOS Apple Silicon
-    - macOS Intel
-    - Linux
-    - Windows
+    Procura o Tesseract no pacote do EXE, no PATH e em caminhos comuns.
+    Tambem valida os idiomas solicitados para evitar falha no meio do OCR.
     """
-    possible_paths = [
+    configure_tessdata_prefix()
+
+    possible_paths: list[str] = []
+    env_path = os.environ.get("TESSERACT_CMD", "").strip()
+    if env_path:
+        possible_paths.append(env_path)
+
+    possible_paths.extend(str(path) for path in bundled_tesseract_candidates())
+    possible_paths.extend([
         "tesseract",
         "/opt/homebrew/bin/tesseract",
         "/usr/local/bin/tesseract",
         "/usr/bin/tesseract",
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    ]
+    ])
 
+    requested_langs = split_languages(language)
+    if not requested_langs:
+        requested_langs = ["por"]
+
+    checked: set[str] = set()
     for path in possible_paths:
+        if path in checked:
+            continue
+        checked.add(path)
+
         try:
             if path != "tesseract" and not Path(path).exists():
                 continue
@@ -104,59 +192,142 @@ def check_tesseract() -> tuple[bool, str]:
             except Exception:
                 langs = []
 
-            if "por" not in langs:
+            missing = [lang for lang in requested_langs if lang not in langs]
+            if missing:
                 return False, (
                     f"Tesseract encontrado em:\n{path}\n\n"
-                    f"Versão:\n{version}\n\n"
-                    "Mas o idioma português não foi encontrado.\n\n"
-                    "No macOS, instale com:\n"
-                    "brew install tesseract-lang\n\n"
-                    "Depois teste:\n"
-                    "tesseract --list-langs\n\n"
-                    "Precisa aparecer: por"
+                    f"Versao:\n{version}\n\n"
+                    "Mas faltam idiomas do OCR:\n"
+                    f"{', '.join(missing)}\n\n"
+                    "Gere o EXE pelo GitHub Actions para embutir o idioma portugues "
+                    "automaticamente no pacote final."
                 )
 
-            return True, f"Tesseract encontrado em {path} | versão {version}"
+            tessdata = os.environ.get("TESSDATA_PREFIX", "padrao do Tesseract")
+            return True, (
+                f"Tesseract OK: {path} | versao {version} | "
+                f"idiomas: {'+'.join(requested_langs)} | tessdata: {tessdata}"
+            )
 
         except Exception:
             continue
 
     return False, (
-        "Tesseract OCR não foi encontrado.\n\n"
-        "No macOS, instale com:\n"
-        "brew install tesseract\n"
-        "brew install tesseract-lang\n\n"
-        "No Windows, instale o Tesseract OCR e marque a opção de adicionar ao PATH.\n\n"
-        "Depois teste no terminal:\n"
-        "tesseract --version\n"
-        "tesseract --list-langs\n\n"
-        "O idioma português precisa aparecer como: por"
+        "Tesseract OCR nao foi encontrado.\n\n"
+        "Gere o EXE pelo GitHub Actions para embutir o Tesseract e o idioma "
+        "portugues automaticamente no pacote final."
     )
 
 
+def find_ocrmypdf_command() -> str | None:
+    candidates = [
+        bundled_resource("vendor", "ocrmypdf", "ocrmypdf.exe"),
+        app_base_dir() / "vendor" / "ocrmypdf" / "ocrmypdf.exe",
+        app_base_dir() / "venv" / ("Scripts" if is_windows() else "bin") / ("ocrmypdf.exe" if is_windows() else "ocrmypdf"),
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return find_executable("ocrmypdf")
+
+
 def check_ocrmypdf() -> tuple[bool, str]:
-    found = find_executable("ocrmypdf")
+    found = find_ocrmypdf_command()
 
     if not found:
-        return False, "OCRmyPDF não encontrado no PATH."
+        return False, "OCRmyPDF nao encontrado. O modo preservacao e opcional."
 
     try:
         result = subprocess.run(
-            ["ocrmypdf", "--version"],
+            [found, "--version"],
             capture_output=True,
             text=True,
             check=True,
         )
-        return True, f"OCRmyPDF encontrado: {result.stdout.strip()}"
+        return True, f"OCRmyPDF OK: {found} | versao {result.stdout.strip()}"
     except Exception as e:
         return False, f"OCRmyPDF encontrado, mas falhou ao executar: {e}"
 
 
-def pil_image_from_pixmap(pix: fitz.Pixmap) -> Image.Image:
+def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     if pix.alpha:
         pix = fitz.Pixmap(fitz.csRGB, pix)
 
-    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    image.info["dpi"] = (dpi, dpi)
+    return image
+
+
+def make_temp_output_path(output_pdf: Path) -> Path:
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{output_pdf.stem}_",
+        suffix=".tmp.pdf",
+        dir=str(output_pdf.parent),
+    )
+    os.close(fd)
+    return Path(name)
+
+
+def validate_pdf_output(input_pdf: Path, output_pdf: Path) -> PdfValidationReport:
+    warnings: list[str] = []
+
+    if not output_pdf.exists() or output_pdf.stat().st_size == 0:
+        raise RuntimeError("O PDF final nao foi criado corretamente.")
+
+    try:
+        source = fitz.open(str(input_pdf))
+        result = fitz.open(str(output_pdf))
+    except Exception as e:
+        raise RuntimeError(f"O PDF final nao pode ser aberto para validacao: {e}") from e
+
+    try:
+        if source.page_count != result.page_count:
+            raise RuntimeError(
+                "Validacao falhou: a quantidade de paginas mudou "
+                f"({source.page_count} entrada, {result.page_count} saida)."
+            )
+
+        for index in range(source.page_count):
+            source_rect = source[index].rect
+            result_rect = result[index].rect
+            width_delta = abs(source_rect.width - result_rect.width)
+            height_delta = abs(source_rect.height - result_rect.height)
+            if width_delta > PAGE_SIZE_TOLERANCE or height_delta > PAGE_SIZE_TOLERANCE:
+                warnings.append(
+                    "Pagina "
+                    f"{index + 1}: tamanho diferente "
+                    f"({source_rect.width:.1f}x{source_rect.height:.1f} -> "
+                    f"{result_rect.width:.1f}x{result_rect.height:.1f})."
+                )
+    finally:
+        source.close()
+        result.close()
+
+    try:
+        reader = PdfReader(str(output_pdf))
+        pages_with_text = sum(1 for page in reader.pages if (page.extract_text() or "").strip())
+    except Exception as e:
+        raise RuntimeError(f"O PDF final foi criado, mas a camada de texto nao pode ser validada: {e}") from e
+
+    if pages_with_text == 0:
+        raise RuntimeError(
+            "Validacao falhou: o PDF final nao possui texto pesquisavel extraivel."
+        )
+
+    return PdfValidationReport(
+        pages=len(reader.pages),
+        pages_with_text=pages_with_text,
+        warnings=warnings,
+    )
+
+
+def publish_validated_pdf(input_pdf: Path, temp_pdf: Path, output_pdf: Path) -> PdfValidationReport:
+    report = validate_pdf_output(input_pdf, temp_pdf)
+    os.replace(temp_pdf, output_pdf)
+    return report
 
 
 # ============================================================
@@ -168,41 +339,54 @@ def run_ocrmypdf_preservation_mode(
     output_pdf: Path,
     language: str,
     progress_callback,
-) -> None:
+) -> PdfValidationReport:
     """
-    Modo preservação:
+    Modo preservacao:
     Usa OCRmyPDF para tentar manter a estrutura original.
     Pode falhar em PDFs assinados/protegidos.
     """
-    progress_callback("Iniciando modo preservação...")
+    progress_callback("Iniciando modo preservacao...")
+    ocrmypdf = find_ocrmypdf_command()
+    if not ocrmypdf:
+        raise RuntimeError("OCRmyPDF nao encontrado para o modo preservacao.")
+
+    temp_output = make_temp_output_path(output_pdf)
 
     command = [
-        "ocrmypdf",
+        ocrmypdf,
         "--language",
         language,
         "--skip-text",
         "--output-type",
         "pdf",
         str(input_pdf),
-        str(output_pdf),
+        str(temp_output),
     ]
 
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        error_text = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(
-            "O modo preservação não conseguiu processar este PDF.\n\n"
-            "Isso pode acontecer com PDF assinado, protegido ou gerado pelo SAJ.\n\n"
-            "Use o modo compatibilidade.\n\n"
-            f"Detalhe técnico:\n{error_text}"
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
         )
 
-    progress_callback("PDF OCR criado com sucesso.")
+        if result.returncode != 0:
+            error_text = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                "O modo preservacao nao conseguiu processar este PDF.\n\n"
+                "Isso pode acontecer com PDF assinado, protegido ou gerado pelo SAJ.\n\n"
+                "Use o modo compatibilidade segura.\n\n"
+                f"Detalhe tecnico:\n{error_text}"
+            )
+
+        progress_callback("Validando PDF final...")
+        report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
+        progress_callback("PDF OCR criado e validado com sucesso.")
+        return report
+
+    finally:
+        if temp_output.exists():
+            temp_output.unlink(missing_ok=True)
 
 
 def run_compatibility_mode(
@@ -212,11 +396,11 @@ def run_compatibility_mode(
     dpi: int,
     progress_callback,
     progress_percent_callback,
-) -> None:
+) -> PdfValidationReport:
     """
     Modo compatibilidade:
-    Renderiza cada página como imagem e aplica OCR.
-    É o mais indicado para PDFs escaneados, SAJ, assinados ou problemáticos.
+    Renderiza cada pagina como imagem e aplica OCR.
+    Preserva pagina, proporcao e dimensao fisica para reduzir risco visual.
     """
     progress_callback("Abrindo PDF...")
 
@@ -225,53 +409,60 @@ def run_compatibility_mode(
 
     if total_pages == 0:
         document.close()
-        raise RuntimeError("O PDF não possui páginas.")
+        raise RuntimeError("O PDF nao possui paginas.")
 
     writer = PdfWriter()
     zoom = dpi / 72
     matrix = fitz.Matrix(zoom, zoom)
 
-    temp_dir = output_pdf.parent / f"__ocr_temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="auto_ocr_pages_", dir=str(output_pdf.parent)))
+    temp_output = make_temp_output_path(output_pdf)
 
     try:
         for page_index in range(total_pages):
             page_number = page_index + 1
 
-            progress_callback(f"Renderizando página {page_number} de {total_pages}...")
-            page = document.load_page(page_index)
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            image = pil_image_from_pixmap(pix)
+            progress_callback(f"Renderizando pagina {page_number} de {total_pages}...")
+            source_page = document.load_page(page_index)
+            source_rect = source_page.rect
+            pix = source_page.get_pixmap(matrix=matrix, alpha=False)
+            image = pil_image_from_pixmap(pix, dpi)
 
-            progress_callback(f"Aplicando OCR na página {page_number} de {total_pages}...")
-
+            progress_callback(f"Aplicando OCR na pagina {page_number} de {total_pages}...")
             pdf_bytes = pytesseract.image_to_pdf_or_hocr(
                 image,
                 extension="pdf",
                 lang=language,
-                config="--psm 6",
+                config=DEFAULT_TESSERACT_CONFIG,
             )
 
             temp_page_pdf = temp_dir / f"page_{page_number:05d}.pdf"
             temp_page_pdf.write_bytes(pdf_bytes)
 
             reader = PdfReader(str(temp_page_pdf))
-            writer.add_page(reader.pages[0])
+            ocr_page = reader.pages[0]
+            ocr_page.scale_to(float(source_rect.width), float(source_rect.height))
+            writer.add_page(ocr_page)
 
-            percent = int((page_number / total_pages) * 100)
+            percent = int((page_number / total_pages) * 90)
             progress_percent_callback(percent)
 
-        progress_callback("Salvando PDF final...")
-
-        with open(output_pdf, "wb") as f:
+        progress_callback("Salvando PDF temporario...")
+        with open(temp_output, "wb") as f:
             writer.write(f)
+
+        progress_percent_callback(95)
+        progress_callback("Validando PDF final...")
+        report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
+        progress_percent_callback(100)
+        progress_callback("PDF OCR criado e validado com sucesso.")
+        return report
 
     finally:
         document.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-    progress_percent_callback(100)
-    progress_callback("PDF OCR criado com sucesso.")
+        if temp_output.exists():
+            temp_output.unlink(missing_ok=True)
 
 
 # ============================================================
@@ -283,11 +474,13 @@ class AutoOCRApp:
         self.root = root
 
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("920x640")
-        self.root.minsize(880, 620)
+        self.root.geometry("1040x700")
+        self.root.minsize(960, 660)
+        self.root.configure(bg=COLOR_BG)
 
         self.selected_pdf: Path | None = None
         self.output_pdf: Path | None = None
+        self.last_report: PdfValidationReport | None = None
         self.worker_thread: threading.Thread | None = None
 
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -307,53 +500,76 @@ class AutoOCRApp:
         style = ttk.Style()
 
         try:
-            if is_macos():
-                style.theme_use("aqua")
-            else:
-                style.theme_use("clam")
+            style.theme_use("clam")
         except Exception:
             pass
 
-        style.configure("Title.TLabel", font=("Segoe UI", 22, "bold"))
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 10))
-        style.configure("Card.TFrame", relief="flat")
-        style.configure("Primary.TButton", font=("Segoe UI", 11, "bold"))
-        style.configure("Secondary.TButton", font=("Segoe UI", 10))
-        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
-        style.configure("Hint.TLabel", font=("Segoe UI", 9))
+        default_font = ("Segoe UI", 10)
+        title_font = ("Segoe UI", 24, "bold")
+        heading_font = ("Segoe UI", 13, "bold")
+        button_font = ("Segoe UI", 10, "bold")
+
+        style.configure(".", font=default_font, background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("Title.TLabel", font=title_font, background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("Subtitle.TLabel", font=("Segoe UI", 10), background=COLOR_BG, foreground=COLOR_MUTED)
+        style.configure("CardTitle.TLabel", font=heading_font, background=COLOR_CARD, foreground=COLOR_TEXT)
+        style.configure("CardText.TLabel", background=COLOR_CARD, foreground=COLOR_TEXT)
+        style.configure("Hint.TLabel", font=("Segoe UI", 9), background=COLOR_CARD, foreground=COLOR_MUTED)
+        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"), background=COLOR_CARD, foreground=COLOR_TEXT)
+        style.configure("Success.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_SUCCESS)
+        style.configure("Warning.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_WARNING)
+        style.configure("Primary.TButton", font=button_font, padding=(12, 9))
+        style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_DARK)])
+        style.configure("Secondary.TButton", padding=(10, 7))
+        style.configure("TProgressbar", troughcolor="#dbeafe", background=COLOR_PRIMARY, bordercolor="#dbeafe")
+        style.configure("TRadiobutton", background=COLOR_CARD, foreground=COLOR_TEXT)
+        style.configure("TEntry", fieldbackground="#ffffff")
+        style.configure("TCombobox", fieldbackground="#ffffff")
+
+    # --------------------------------------------------------
+
+    def make_card(self, parent, title: str | None = None, **pack_options) -> tk.Frame:
+        card = tk.Frame(
+            parent,
+            bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=1,
+            bd=0,
+        )
+        card.pack(**pack_options)
+
+        if title:
+            label = ttk.Label(card, text=title, style="CardTitle.TLabel")
+            label.pack(anchor="w", padx=18, pady=(16, 8))
+
+        return card
 
     # --------------------------------------------------------
 
     def create_layout(self):
-        main = ttk.Frame(self.root, padding=24)
-        main.pack(fill="both", expand=True)
+        main = tk.Frame(self.root, bg=COLOR_BG)
+        main.pack(fill="both", expand=True, padx=26, pady=24)
 
-        # Header
-        header = ttk.Frame(main)
+        header = tk.Frame(main, bg=COLOR_BG)
         header.pack(fill="x")
 
-        title = ttk.Label(
-            header,
-            text="Auto OCR PDF",
-            style="Title.TLabel",
-        )
+        title = ttk.Label(header, text="Auto OCR PDF", style="Title.TLabel")
         title.pack(anchor="w")
 
         subtitle = ttk.Label(
             header,
-            text="Transforme PDFs escaneados em arquivos pesquisáveis e com texto selecionável.",
+            text="Converta PDFs escaneados em arquivos pesquisaveis, selecionaveis e validados.",
             style="Subtitle.TLabel",
         )
         subtitle.pack(anchor="w", pady=(4, 0))
 
-        # Conteúdo principal
-        content = ttk.Frame(main)
+        content = tk.Frame(main, bg=COLOR_BG)
         content.pack(fill="both", expand=True, pady=(22, 0))
 
-        left = ttk.Frame(content)
+        left = tk.Frame(content, bg=COLOR_BG)
         left.pack(side="left", fill="both", expand=True)
 
-        right = ttk.Frame(content, width=300)
+        right = tk.Frame(content, bg=COLOR_BG, width=330)
         right.pack(side="right", fill="y", padx=(22, 0))
         right.pack_propagate(False)
 
@@ -362,53 +578,56 @@ class AutoOCRApp:
         self.create_log_card(left)
 
         self.create_options_card(right)
+        self.create_validation_card(right)
         self.create_actions_card(right)
         self.create_help_card(right)
 
     # --------------------------------------------------------
 
     def create_file_card(self, parent):
-        card = ttk.LabelFrame(parent, text="1. Selecione o PDF")
-        card.pack(fill="x")
+        card = self.make_card(parent, "PDF de entrada", fill="x")
 
         upload_area = tk.Frame(
             card,
-            bg="#f4f6f8",
-            highlightbackground="#c9d1d9",
+            bg=COLOR_CARD_ALT,
+            highlightbackground="#bfdbfe",
             highlightthickness=1,
-            height=150,
+            height=154,
         )
-        upload_area.pack(fill="x", padx=14, pady=14)
+        upload_area.pack(fill="x", padx=18, pady=(4, 18))
         upload_area.pack_propagate(False)
 
         icon = tk.Label(
             upload_area,
-            text="📄",
-            font=("Segoe UI Emoji", 34),
-            bg="#f4f6f8",
+            text="PDF",
+            font=("Segoe UI", 18, "bold"),
+            bg=COLOR_PRIMARY,
+            fg="#ffffff",
+            width=5,
+            height=1,
         )
-        icon.pack(pady=(18, 4))
+        icon.pack(pady=(20, 8))
 
         self.file_title_label = tk.Label(
             upload_area,
             text="Nenhum PDF selecionado",
             font=("Segoe UI", 12, "bold"),
-            bg="#f4f6f8",
-            fg="#111827",
+            bg=COLOR_CARD_ALT,
+            fg=COLOR_TEXT,
         )
         self.file_title_label.pack()
 
         self.file_path_label = tk.Label(
             upload_area,
-            text="Clique no botão abaixo para escolher um arquivo PDF",
+            text="Escolha um arquivo PDF para gerar uma copia OCR sem alterar o original.",
             font=("Segoe UI", 9),
-            bg="#f4f6f8",
-            fg="#6b7280",
-            wraplength=560,
+            bg=COLOR_CARD_ALT,
+            fg=COLOR_MUTED,
+            wraplength=620,
         )
-        self.file_path_label.pack(pady=(4, 10))
+        self.file_path_label.pack(pady=(5, 12))
 
-        buttons = ttk.Frame(upload_area)
+        buttons = tk.Frame(upload_area, bg=COLOR_CARD_ALT)
         buttons.pack()
 
         self.btn_select = ttk.Button(
@@ -424,68 +643,69 @@ class AutoOCRApp:
             text="Limpar",
             command=self.clear_pdf,
             state="disabled",
+            style="Secondary.TButton",
         )
         self.btn_clear.pack(side="left", padx=4)
 
     # --------------------------------------------------------
 
     def create_options_card(self, parent):
-        card = ttk.LabelFrame(parent, text="2. Configurações")
-        card.pack(fill="x")
+        card = self.make_card(parent, "Configuracoes", fill="x")
 
-        mode_label = ttk.Label(card, text="Modo de processamento:")
-        mode_label.pack(anchor="w", padx=14, pady=(14, 4))
+        mode_label = ttk.Label(card, text="Modo de processamento", style="CardText.TLabel")
+        mode_label.pack(anchor="w", padx=18, pady=(2, 6))
 
         rb_compat = ttk.Radiobutton(
             card,
-            text="Recomendado para SAJ",
+            text="Compatibilidade segura",
             variable=self.mode_var,
             value="compat",
         )
-        rb_compat.pack(anchor="w", padx=14)
+        rb_compat.pack(anchor="w", padx=18)
 
         compat_hint = ttk.Label(
             card,
-            text="Mais compatível com PDFs assinados, escaneados ou bloqueados para cópia.",
-            wraplength=250,
+            text="Recomendado para SAJ, digitalizados, assinados ou bloqueados para copia.",
+            wraplength=280,
             style="Hint.TLabel",
         )
-        compat_hint.pack(anchor="w", padx=34, pady=(0, 8))
+        compat_hint.pack(anchor="w", padx=38, pady=(0, 10))
 
         rb_preserve = ttk.Radiobutton(
             card,
-            text="Preservação máxima",
+            text="Preservacao maxima",
             variable=self.mode_var,
             value="preserve",
         )
-        rb_preserve.pack(anchor="w", padx=14)
+        rb_preserve.pack(anchor="w", padx=18)
 
         preserve_hint = ttk.Label(
             card,
-            text="Tenta manter a estrutura original, mas pode falhar em PDF protegido.",
-            wraplength=250,
+            text="Tenta manter estrutura original. Exige OCRmyPDF e pode falhar em PDF protegido.",
+            wraplength=280,
             style="Hint.TLabel",
         )
-        preserve_hint.pack(anchor="w", padx=34, pady=(0, 12))
+        preserve_hint.pack(anchor="w", padx=38, pady=(0, 14))
 
-        ttk.Separator(card).pack(fill="x", padx=14, pady=6)
+        separator = tk.Frame(card, bg=COLOR_BORDER, height=1)
+        separator.pack(fill="x", padx=18, pady=(0, 12))
 
-        lang_label = ttk.Label(card, text="Idioma do OCR:")
-        lang_label.pack(anchor="w", padx=14, pady=(8, 4))
+        lang_label = ttk.Label(card, text="Idioma do OCR", style="CardText.TLabel")
+        lang_label.pack(anchor="w", padx=18, pady=(0, 4))
 
         lang_entry = ttk.Entry(card, textvariable=self.language_var)
-        lang_entry.pack(fill="x", padx=14)
+        lang_entry.pack(fill="x", padx=18)
 
         lang_hint = ttk.Label(
             card,
-            text="Português: por | Português + Inglês: por+eng",
-            wraplength=250,
+            text="Portugues: por | Portugues + Ingles: por+eng",
+            wraplength=280,
             style="Hint.TLabel",
         )
-        lang_hint.pack(anchor="w", padx=14, pady=(4, 10))
+        lang_hint.pack(anchor="w", padx=18, pady=(4, 12))
 
-        dpi_label = ttk.Label(card, text="Qualidade no modo SAJ:")
-        dpi_label.pack(anchor="w", padx=14, pady=(8, 4))
+        dpi_label = ttk.Label(card, text="Qualidade visual", style="CardText.TLabel")
+        dpi_label.pack(anchor="w", padx=18, pady=(0, 4))
 
         dpi_combo = ttk.Combobox(
             card,
@@ -493,28 +713,27 @@ class AutoOCRApp:
             values=["200", "300", "400", "500"],
             state="readonly",
         )
-        dpi_combo.pack(fill="x", padx=14)
+        dpi_combo.pack(fill="x", padx=18)
 
         dpi_hint = ttk.Label(
             card,
-            text="300 é o recomendado. 400 aumenta a qualidade e o tamanho do arquivo.",
-            wraplength=250,
+            text="300 e o equilibrio recomendado. 400/500 melhora imagem e aumenta tamanho.",
+            wraplength=280,
             style="Hint.TLabel",
         )
-        dpi_hint.pack(anchor="w", padx=14, pady=(4, 14))
+        dpi_hint.pack(anchor="w", padx=18, pady=(4, 18))
 
     # --------------------------------------------------------
 
     def create_progress_card(self, parent):
-        card = ttk.LabelFrame(parent, text="3. Progresso")
-        card.pack(fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Progresso", fill="x", pady=(18, 0))
 
         self.status_label = ttk.Label(
             card,
-            text="Aguardando seleção do PDF...",
+            text="Aguardando selecao do PDF...",
             style="Status.TLabel",
         )
-        self.status_label.pack(anchor="w", padx=14, pady=(14, 6))
+        self.status_label.pack(anchor="w", padx=18, pady=(2, 8))
 
         self.progress = ttk.Progressbar(
             card,
@@ -522,85 +741,98 @@ class AutoOCRApp:
             maximum=100,
             value=0,
         )
-        self.progress.pack(fill="x", padx=14, pady=(0, 6))
+        self.progress.pack(fill="x", padx=18, pady=(0, 6))
 
         self.progress_percent_label = ttk.Label(
             card,
             text="0%",
+            style="Hint.TLabel",
         )
-        self.progress_percent_label.pack(anchor="e", padx=14, pady=(0, 14))
+        self.progress_percent_label.pack(anchor="e", padx=18, pady=(0, 16))
+
+    # --------------------------------------------------------
+
+    def create_validation_card(self, parent):
+        card = self.make_card(parent, "Validacao", fill="x", pady=(18, 0))
+
+        self.validation_status_label = ttk.Label(
+            card,
+            text="Aguardando processamento",
+            style="Hint.TLabel",
+            wraplength=280,
+        )
+        self.validation_status_label.pack(anchor="w", padx=18, pady=(0, 16))
 
     # --------------------------------------------------------
 
     def create_actions_card(self, parent):
-        card = ttk.LabelFrame(parent, text="3. Ações")
-        card.pack(fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Acoes", fill="x", pady=(18, 0))
 
         self.btn_process = ttk.Button(
             card,
-            text="Gerar PDF com OCR",
+            text="Gerar PDF pesquisavel",
             command=self.start_processing,
             state="disabled",
             style="Primary.TButton",
         )
-        self.btn_process.pack(fill="x", padx=14, pady=(14, 8), ipady=6)
+        self.btn_process.pack(fill="x", padx=18, pady=(0, 10))
 
         self.btn_open_pdf = ttk.Button(
             card,
             text="Abrir PDF final",
             command=self.open_output_pdf,
             state="disabled",
+            style="Secondary.TButton",
         )
-        self.btn_open_pdf.pack(fill="x", padx=14, pady=4)
+        self.btn_open_pdf.pack(fill="x", padx=18, pady=4)
 
         self.btn_open_folder = ttk.Button(
             card,
             text="Abrir pasta do resultado",
             command=self.open_output_folder,
             state="disabled",
+            style="Secondary.TButton",
         )
-        self.btn_open_folder.pack(fill="x", padx=14, pady=(4, 14))
+        self.btn_open_folder.pack(fill="x", padx=18, pady=(4, 18))
 
     # --------------------------------------------------------
 
     def create_help_card(self, parent):
-        card = ttk.LabelFrame(parent, text="Aviso")
-        card.pack(fill="both", expand=True, pady=(18, 0))
+        card = self.make_card(parent, "Seguranca", fill="both", expand=True, pady=(18, 0))
 
         text = (
-            "Este app não remove senha, não quebra proteção e não altera "
-            "o PDF original.\n\n"
-            "Ele cria uma nova cópia visualmente equivalente com camada "
-            "de texto pesquisável.\n\n"
-            "Para PDFs do SAJ, use o modo recomendado."
+            "O arquivo original nao e alterado.\n\n"
+            "A saida so e publicada depois de abrir, conferir paginas e validar texto pesquisavel.\n\n"
+            "PDFs assinados podem perder a assinatura na copia OCR."
         )
 
         label = ttk.Label(
             card,
             text=text,
-            wraplength=250,
+            wraplength=280,
             justify="left",
+            style="CardText.TLabel",
         )
-        label.pack(anchor="nw", padx=14, pady=14)
+        label.pack(anchor="nw", padx=18, pady=(0, 18))
 
     # --------------------------------------------------------
 
     def create_log_card(self, parent):
-        card = ttk.LabelFrame(parent, text="Log do processamento")
-        card.pack(fill="both", expand=True, pady=(18, 0))
+        card = self.make_card(parent, "Log tecnico", fill="both", expand=True, pady=(18, 0))
 
         self.log_text = tk.Text(
             card,
             height=10,
             wrap="word",
             state="disabled",
-            bg="#0f172a",
-            fg="#e5e7eb",
+            bg=COLOR_LOG_BG,
+            fg=COLOR_LOG_TEXT,
             insertbackground="#ffffff",
             relief="flat",
+            borderwidth=0,
             font=("Menlo", 10) if is_macos() else ("Consolas", 10),
         )
-        self.log_text.pack(fill="both", expand=True, padx=14, pady=14)
+        self.log_text.pack(fill="both", expand=True, padx=18, pady=(0, 18))
 
     # --------------------------------------------------------
 
@@ -615,6 +847,7 @@ class AutoOCRApp:
 
         self.selected_pdf = Path(pdf_file)
         self.output_pdf = None
+        self.last_report = None
 
         self.file_title_label.config(text=self.selected_pdf.name)
         self.file_path_label.config(text=str(self.selected_pdf))
@@ -625,6 +858,7 @@ class AutoOCRApp:
         self.btn_open_folder.config(state="disabled")
 
         self.set_progress(0)
+        self.set_validation_status("Aguardando processamento", warning=False)
         self.log(f"PDF selecionado: {self.selected_pdf}")
 
     # --------------------------------------------------------
@@ -632,9 +866,10 @@ class AutoOCRApp:
     def clear_pdf(self):
         self.selected_pdf = None
         self.output_pdf = None
+        self.last_report = None
 
         self.file_title_label.config(text="Nenhum PDF selecionado")
-        self.file_path_label.config(text="Clique no botão abaixo para escolher um arquivo PDF")
+        self.file_path_label.config(text="Escolha um arquivo PDF para gerar uma copia OCR sem alterar o original.")
 
         self.btn_clear.config(state="disabled")
         self.btn_process.config(state="disabled")
@@ -642,8 +877,9 @@ class AutoOCRApp:
         self.btn_open_folder.config(state="disabled")
 
         self.set_progress(0)
-        self.set_status("Aguardando seleção do PDF...")
-        self.log("Seleção limpa.")
+        self.set_status("Aguardando selecao do PDF...")
+        self.set_validation_status("Aguardando processamento", warning=False)
+        self.log("Selecao limpa.")
 
     # --------------------------------------------------------
 
@@ -652,7 +888,7 @@ class AutoOCRApp:
             return False, "Selecione um PDF primeiro."
 
         if not self.selected_pdf.exists():
-            return False, "O PDF selecionado não existe."
+            return False, "O PDF selecionado nao existe."
 
         if self.selected_pdf.suffix.lower() != ".pdf":
             return False, "O arquivo selecionado precisa ser um PDF."
@@ -667,9 +903,9 @@ class AutoOCRApp:
             if dpi < 100 or dpi > 600:
                 return False, "Use um DPI entre 100 e 600."
         except ValueError:
-            return False, "DPI inválido. Use um número, exemplo: 300."
+            return False, "DPI invalido. Use um numero, exemplo: 300."
 
-        ok_tess, msg_tess = check_tesseract()
+        ok_tess, msg_tess = check_tesseract(language)
         self.log(msg_tess)
 
         if not ok_tess:
@@ -681,8 +917,8 @@ class AutoOCRApp:
 
             if not ok_ocr:
                 return False, (
-                    "OCRmyPDF não encontrado.\n\n"
-                    "Use o modo recomendado para SAJ ou instale OCRmyPDF."
+                    "OCRmyPDF nao encontrado.\n\n"
+                    "Use o modo compatibilidade segura ou integre o OCRmyPDF ao pacote."
                 )
 
         return True, "OK"
@@ -693,7 +929,7 @@ class AutoOCRApp:
         valid, message = self.validate_inputs()
 
         if not valid:
-            messagebox.showerror("Atenção", message)
+            messagebox.showerror("Atencao", message)
             return
 
         self.btn_process.config(state="disabled")
@@ -702,8 +938,10 @@ class AutoOCRApp:
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
 
+        self.last_report = None
         self.set_progress(0)
         self.set_status("Iniciando OCR...")
+        self.set_validation_status("Processando...", warning=False)
         self.log("Iniciando processamento...")
 
         self.worker_thread = threading.Thread(
@@ -732,24 +970,22 @@ class AutoOCRApp:
                 dpi = DEFAULT_DPI
 
             self.log(f"Arquivo de entrada: {input_pdf}")
-            self.log(f"Arquivo de saída: {output_pdf}")
+            self.log(f"Arquivo de saida: {output_pdf}")
             self.log(f"Idioma OCR: {language}")
-            self.log(f"Modo: {'Compatibilidade SAJ' if mode == 'compat' else 'Preservação máxima'}")
+            self.log(f"Modo: {'Compatibilidade segura' if mode == 'compat' else 'Preservacao maxima'}")
 
             if mode == "preserve":
                 self.progress_queue.put(10)
-
-                run_ocrmypdf_preservation_mode(
+                report = run_ocrmypdf_preservation_mode(
                     input_pdf=input_pdf,
                     output_pdf=output_pdf,
                     language=language,
                     progress_callback=self.log,
                 )
-
                 self.progress_queue.put(100)
 
             else:
-                run_compatibility_mode(
+                report = run_compatibility_mode(
                     input_pdf=input_pdf,
                     output_pdf=output_pdf,
                     language=language,
@@ -758,7 +994,15 @@ class AutoOCRApp:
                     progress_percent_callback=lambda value: self.progress_queue.put(value),
                 )
 
-            self.log("Processamento concluído.")
+            self.last_report = report
+            self.log(
+                "Validacao: "
+                f"{report.pages} paginas, {report.pages_with_text} com texto pesquisavel."
+            )
+            for warning in report.warnings:
+                self.log(f"Alerta: {warning}")
+
+            self.log("Processamento concluido.")
             self.root.after(0, self.processing_success)
 
         except Exception as e:
@@ -772,21 +1016,31 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def processing_success(self):
-        self.set_status("PDF OCR criado com sucesso.")
+        self.set_status("PDF OCR criado e validado.")
         self.set_progress(100)
 
         self.btn_open_pdf.config(state="normal")
         self.btn_open_folder.config(state="normal")
 
+        if self.last_report:
+            validation_text = (
+                f"OK: {self.last_report.pages} paginas | "
+                f"{self.last_report.pages_with_text} com texto pesquisavel"
+            )
+            if self.last_report.warnings:
+                validation_text += f" | {len(self.last_report.warnings)} alerta(s)"
+            self.set_validation_status(validation_text, warning=bool(self.last_report.warnings))
+
         messagebox.showinfo(
-            "Concluído",
-            f"PDF pesquisável criado com sucesso:\n\n{self.output_pdf}",
+            "Concluido",
+            f"PDF pesquisavel criado e validado:\n\n{self.output_pdf}",
         )
 
     # --------------------------------------------------------
 
     def processing_error(self, error_message: str):
         self.set_status("Erro ao processar PDF.")
+        self.set_validation_status("Falha na validacao ou no processamento", warning=True)
         messagebox.showerror("Erro ao processar PDF", error_message)
 
     # --------------------------------------------------------
@@ -804,7 +1058,7 @@ class AutoOCRApp:
         if self.output_pdf and self.output_pdf.exists():
             open_file(self.output_pdf)
         else:
-            messagebox.showwarning("Atenção", "Nenhum PDF final encontrado.")
+            messagebox.showwarning("Atencao", "Nenhum PDF final encontrado.")
 
     # --------------------------------------------------------
 
@@ -814,7 +1068,7 @@ class AutoOCRApp:
         elif self.selected_pdf:
             open_folder(self.selected_pdf)
         else:
-            messagebox.showwarning("Atenção", "Nenhuma pasta disponível.")
+            messagebox.showwarning("Atencao", "Nenhuma pasta disponivel.")
 
     # --------------------------------------------------------
 
@@ -825,6 +1079,12 @@ class AutoOCRApp:
 
     def set_status(self, text: str):
         self.status_label.config(text=text)
+
+    # --------------------------------------------------------
+
+    def set_validation_status(self, text: str, warning: bool):
+        style = "Warning.TLabel" if warning else "Success.TLabel"
+        self.validation_status_label.config(text=text, style=style)
 
     # --------------------------------------------------------
 

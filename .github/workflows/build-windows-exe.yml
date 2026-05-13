@@ -1,0 +1,136 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "app.py"
+      - "requirements.txt"
+      - ".github/workflows/build-windows-exe.yml"
+
+jobs:
+  build-windows:
+    name: Build AutoOCRPDF.exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Prepare embedded Tesseract
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+
+          $tesseractRoot = "${env:ProgramFiles}\Tesseract-OCR"
+          if (!(Test-Path "$tesseractRoot\tesseract.exe")) {
+            throw "Tesseract executable not found at $tesseractRoot"
+          }
+
+          New-Item -ItemType Directory -Force -Path "vendor\tesseract" | Out-Null
+          New-Item -ItemType Directory -Force -Path "vendor\tessdata" | Out-Null
+
+          Copy-Item "$tesseractRoot\*" "vendor\tesseract" -Recurse -Force
+
+          Invoke-WebRequest `
+            -Uri "https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata" `
+            -OutFile "vendor\tessdata\por.traineddata"
+
+          if (Test-Path "$tesseractRoot\tessdata\eng.traineddata") {
+            Copy-Item "$tesseractRoot\tessdata\eng.traineddata" "vendor\tessdata\eng.traineddata" -Force
+          }
+
+          .\vendor\tesseract\tesseract.exe --version
+          .\vendor\tesseract\tesseract.exe --list-langs --tessdata-dir .\vendor\tessdata
+
+      - name: Smoke test OCR logic
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import shutil
+          import fitz
+          from PIL import Image, ImageDraw
+          from pypdf import PdfReader
+          import app
+
+          work = Path("smoke_ocr")
+          if work.exists():
+              shutil.rmtree(work)
+          work.mkdir()
+
+          image = Image.new("RGB", (1240, 1754), "white")
+          draw = ImageDraw.Draw(image)
+          draw.text((120, 180), "AUTO OCR TESTE WINDOWS", fill="black")
+          draw.text((120, 260), "Processo 12345-67.2026.8.01.0001", fill="black")
+
+          input_pdf = work / "entrada.pdf"
+          output_pdf = work / "saida.pdf"
+          image.save(input_pdf, "PDF", resolution=200.0)
+
+          ok, message = app.check_tesseract("por")
+          if not ok:
+              raise RuntimeError(message)
+
+          report = app.run_compatibility_mode(
+              input_pdf=input_pdf,
+              output_pdf=output_pdf,
+              language="por",
+              dpi=200,
+              progress_callback=lambda _: None,
+              progress_percent_callback=lambda _: None,
+          )
+
+          text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output_pdf)).pages)
+          with fitz.open(str(input_pdf)) as src, fitz.open(str(output_pdf)) as dst:
+              if src.page_count != dst.page_count:
+                  raise RuntimeError("Page count changed during OCR smoke test.")
+              if abs(src[0].rect.width - dst[0].rect.width) > 0.1:
+                  raise RuntimeError("Page width changed during OCR smoke test.")
+              if abs(src[0].rect.height - dst[0].rect.height) > 0.1:
+                  raise RuntimeError("Page height changed during OCR smoke test.")
+
+          if report.pages != 1 or report.pages_with_text != 1:
+              raise RuntimeError("OCR validation report failed.")
+          if "AUTO" not in text.upper():
+              raise RuntimeError("OCR text was not extracted.")
+
+          print("OCR smoke test passed.")
+          '@ | python
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --name "AutoOCRPDF" `
+            --onefile `
+            --windowed `
+            --clean `
+            --add-data "vendor\tesseract;vendor\tesseract" `
+            --add-data "vendor\tessdata;vendor\tessdata" `
+            app.py
+
+          if (!(Test-Path "dist\AutoOCRPDF.exe")) {
+            throw "dist\AutoOCRPDF.exe was not generated."
+          }
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoOCRPDF-Windows
+          path: dist/AutoOCRPDF.exe
+          if-no-files-found: error
