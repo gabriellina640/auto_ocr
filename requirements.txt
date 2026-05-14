@@ -2,5 +2,6 @@ pytesseract
 Pillow
 PyMuPDF
 pypdf
+tkinterdnd2
 windnd; platform_system == "Windows"
 pyinstaller

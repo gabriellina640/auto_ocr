@@ -12,6 +12,7 @@ Fluxo para o usuario:
 Nao existem configuracoes para o usuario final. O app usa automaticamente o modo de maior fidelidade visual para PDFs do SAJ.
 
 O PDF final recebe camada de texto pesquisavel/selecionavel e passa por validacao tecnica antes de ser liberado.
+Durante o processamento, o botao Cancelar OCR interrompe a geracao e remove arquivos temporarios.
 
 VALIDACOES DO APP
 

@@ -17,12 +17,20 @@ import pytesseract
 from PIL import Image
 from pypdf import PdfWriter, PdfReader
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:
+    DND_FILES = None
+    TkinterDnD = None
+
 windnd = None
 if os.name == "nt":
     try:
         import windnd
     except Exception:
         windnd = None
+
+DND_ERROR = ""
 
 
 APP_NAME = "Auto OCR PDF"
@@ -56,6 +64,10 @@ class PdfValidationReport:
     warnings: list[str]
 
 
+class ProcessingCancelled(Exception):
+    pass
+
+
 # ============================================================
 # UTILITARIOS
 # ============================================================
@@ -69,6 +81,16 @@ def is_frozen_app() -> bool:
 
 
 def create_root_window() -> tk.Tk:
+    global DND_FILES, TkinterDnD, DND_ERROR
+
+    if TkinterDnD is not None:
+        try:
+            return TkinterDnD.Tk()
+        except Exception as e:
+            DND_ERROR = str(e)
+            DND_FILES = None
+            TkinterDnD = None
+
     return tk.Tk()
 
 
@@ -132,7 +154,7 @@ def safe_output_path(input_pdf: Path) -> Path:
         return base
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return input_pdf.with_name(f"{input_pdf.stem}_OCR_{timestamp}.pdf")
+    return output_dir / f"{input_pdf.stem}_OCR_{timestamp}.pdf"
 
 
 def split_languages(language: str) -> list[str]:
@@ -246,7 +268,20 @@ def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     return image
 
 
-def run_tesseract_pdf(image: Image.Image, output_base: Path, language: str, dpi: int) -> Path:
+def raise_if_cancelled(cancel_event: threading.Event | None):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ProcessingCancelled("Processamento cancelado pelo usuario.")
+
+
+def run_tesseract_pdf(
+    image: Image.Image,
+    output_base: Path,
+    language: str,
+    dpi: int,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    raise_if_cancelled(cancel_event)
+
     image_path = output_base.with_suffix(".png")
     output_pdf = output_base.with_suffix(".pdf")
 
@@ -270,15 +305,33 @@ def run_tesseract_pdf(image: Image.Image, output_base: Path, language: str, dpi:
     ]
 
     env = os.environ.copy()
-    result = subprocess.run(
+    process = subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=env,
         **hidden_subprocess_kwargs(),
     )
 
-    stderr = result.stderr.decode(errors="replace").strip()
-    stdout = result.stdout.decode(errors="replace").strip()
+    while process.poll() is None:
+        if cancel_event is not None and cancel_event.is_set():
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+            output_pdf.unlink(missing_ok=True)
+            raise ProcessingCancelled("Processamento cancelado pelo usuario.")
+
+        try:
+            process.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            pass
+
+    stdout_bytes, stderr_bytes = process.communicate()
+    stderr = stderr_bytes.decode(errors="replace").strip()
+    stdout = stdout_bytes.decode(errors="replace").strip()
 
     cli_detail = stderr or stdout or "sem detalhe tecnico"
     if output_pdf.exists() and output_pdf.stat().st_size > 0:
@@ -290,18 +343,22 @@ def run_tesseract_pdf(image: Image.Image, output_base: Path, language: str, dpi:
             output_pdf.unlink(missing_ok=True)
 
     try:
+        raise_if_cancelled(cancel_event)
         pdf_bytes = pytesseract.image_to_pdf_or_hocr(
             image,
             extension="pdf",
             lang=language,
             config="--psm 3 -c preserve_interword_spaces=1",
         )
+        raise_if_cancelled(cancel_event)
         output_pdf.write_bytes(pdf_bytes)
         PdfReader(str(output_pdf))
         return output_pdf
     except Exception as e:
         output_pdf.unlink(missing_ok=True)
-        if result.returncode != 0:
+        if isinstance(e, ProcessingCancelled):
+            raise
+        if process.returncode != 0:
             raise RuntimeError(
                 "Tesseract nao conseguiu gerar PDF OCR. "
                 f"CLI: {cli_detail}. Fallback pytesseract: {e}"
@@ -463,12 +520,14 @@ def run_compatibility_mode(
     dpi: int,
     progress_callback,
     progress_percent_callback,
+    cancel_event: threading.Event | None = None,
 ) -> PdfValidationReport:
     """
     Modo compatibilidade:
     Renderiza cada pagina como imagem e aplica OCR.
     Preserva pagina, proporcao e dimensao fisica para reduzir risco visual.
     """
+    raise_if_cancelled(cancel_event)
     progress_callback("Abrindo PDF...")
 
     document = fitz.open(str(input_pdf))
@@ -487,6 +546,7 @@ def run_compatibility_mode(
 
     try:
         for page_index in range(total_pages):
+            raise_if_cancelled(cancel_event)
             page_number = page_index + 1
 
             progress_callback(f"Renderizando pagina {page_number} de {total_pages}...")
@@ -502,8 +562,10 @@ def run_compatibility_mode(
                 output_base=temp_page_base,
                 language=language,
                 dpi=dpi,
+                cancel_event=cancel_event,
             )
 
+            raise_if_cancelled(cancel_event)
             reader = PdfReader(str(temp_page_pdf))
             ocr_page = reader.pages[0]
             ocr_page.scale_to(float(source_rect.width), float(source_rect.height))
@@ -512,13 +574,16 @@ def run_compatibility_mode(
             percent = int((page_number / total_pages) * 90)
             progress_percent_callback(percent)
 
+        raise_if_cancelled(cancel_event)
         progress_callback("Salvando PDF temporario...")
         with open(temp_output, "wb") as f:
             writer.write(f)
 
+        raise_if_cancelled(cancel_event)
         progress_percent_callback(95)
         progress_callback("Compactando PDF final...")
         temp_output = optimize_pdf_size(temp_output, progress_callback)
+        raise_if_cancelled(cancel_event)
         progress_percent_callback(98)
         progress_callback("Validando PDF final...")
         report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
@@ -631,14 +696,71 @@ class AutoOCRApp:
         self.output_pdf: Path | None = None
         self.last_report: PdfValidationReport | None = None
         self.worker_thread: threading.Thread | None = None
+        self.processing_busy = False
+        self.upload_area: tk.Frame | None = None
+        self.cancel_event = threading.Event()
+        self.current_job_id = 0
+        self.cancelled_job_ids: set[int] = set()
+        self.closing = False
+        self.after_ids: set[str] = set()
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.progress_queue: queue.Queue[int] = queue.Queue()
 
+        self.root.protocol("WM_DELETE_WINDOW", self.close_app)
         self.setup_style()
         self.create_layout()
         self.configure_drag_and_drop()
         self.process_queues()
+
+    # --------------------------------------------------------
+
+    def after_ui(self, delay_ms: int, callback):
+        if self.closing:
+            return None
+
+        holder: dict[str, str] = {}
+
+        def wrapped_callback():
+            after_id = holder.get("id")
+            if after_id is not None:
+                self.after_ids.discard(after_id)
+
+            if self.closing:
+                return
+
+            callback()
+
+        try:
+            after_id = self.root.after(delay_ms, wrapped_callback)
+            holder["id"] = after_id
+            self.after_ids.add(after_id)
+            return after_id
+        except tk.TclError:
+            return None
+
+    # --------------------------------------------------------
+
+    def close_app(self):
+        self.closing = True
+        self.cancel_event.set()
+
+        for after_id in list(self.after_ids):
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            self.after_ids.discard(after_id)
+
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+        try:
+            self.root.quit()
+        except tk.TclError:
+            pass
 
     # --------------------------------------------------------
 
@@ -753,6 +875,7 @@ class AutoOCRApp:
             highlightthickness=2,
             height=220,
         )
+        self.upload_area = upload_area
         upload_area.pack(fill="x", padx=18, pady=(4, 18))
         upload_area.pack_propagate(False)
 
@@ -797,17 +920,34 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def configure_drag_and_drop(self):
-        registered = self.register_windnd_target_tree(self.root)
+        targets = [self.root]
+        if self.upload_area is not None:
+            targets.append(self.upload_area)
+
+        registered = any(self.register_tkdnd_target(widget) for widget in targets)
+        if not registered:
+            registered = any(self.register_windnd_target(widget) for widget in targets)
+
         if registered:
             self.log("Arraste um PDF para qualquer area da janela para iniciar.")
         else:
-            self.log("Arrastar e soltar indisponivel; use o botao Selecionar PDF.")
+            message = "Arrastar e soltar indisponivel; use o botao Selecionar PDF."
+            if DND_ERROR:
+                message = f"{message} Detalhe: {DND_ERROR}"
+            self.log(message)
 
-    def register_windnd_target_tree(self, widget) -> bool:
-        registered = self.register_windnd_target(widget)
-        for child in widget.winfo_children():
-            registered = self.register_windnd_target_tree(child) or registered
-        return registered
+    # --------------------------------------------------------
+
+    def register_tkdnd_target(self, widget) -> bool:
+        if DND_FILES is None or not hasattr(widget, "drop_target_register"):
+            return False
+
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self.handle_tkdnd_drop)
+            return True
+        except Exception:
+            return False
 
     # --------------------------------------------------------
 
@@ -824,11 +964,26 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def handle_windnd_drop(self, files):
-        if not files:
-            return
+        try:
+            if not files:
+                return
 
-        path = os.fsdecode(files[0])
-        self.root.after(0, lambda: self.load_pdf(Path(path)))
+            path = Path(os.fsdecode(files[0]))
+            self.after_ui(0, lambda: self.load_pdf(path))
+        except Exception as e:
+            self.log(f"Falha ao receber arquivo arrastado: {e}")
+
+    # --------------------------------------------------------
+
+    def handle_tkdnd_drop(self, event):
+        try:
+            dropped_files = self.root.tk.splitlist(event.data)
+            if not dropped_files:
+                return
+
+            self.load_pdf(Path(dropped_files[0]))
+        except Exception as e:
+            self.log(f"Falha ao receber arquivo arrastado: {e}")
 
     # --------------------------------------------------------
 
@@ -855,7 +1010,16 @@ class AutoOCRApp:
             text="0%",
             style="Hint.TLabel",
         )
-        self.progress_percent_label.pack(anchor="e", padx=18, pady=(0, 16))
+        self.progress_percent_label.pack(anchor="e", padx=18, pady=(0, 10))
+
+        self.btn_cancel = self.make_action_button(
+            card,
+            text="Cancelar OCR",
+            command=self.cancel_processing,
+            primary=False,
+        )
+        self.btn_cancel.config(state="disabled")
+        self.btn_cancel.pack(anchor="w", padx=18, pady=(0, 16))
 
     # --------------------------------------------------------
 
@@ -948,10 +1112,17 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def load_pdf(self, pdf_path: Path):
-        if self.worker_thread and self.worker_thread.is_alive():
-            messagebox.showwarning("Atencao", "Aguarde o processamento atual terminar.")
+        if self.processing_busy:
+            self.log("Arquivo ignorado: processamento em andamento.")
             return
 
+        if pdf_path.suffix.lower() != ".pdf":
+            messagebox.showwarning("Atencao", "Solte ou selecione um arquivo PDF.")
+            return
+
+        job_id = self.current_job_id + 1
+        self.current_job_id = job_id
+        self.processing_busy = True
         self.selected_pdf = pdf_path
         self.output_pdf = None
         self.last_report = None
@@ -965,7 +1136,7 @@ class AutoOCRApp:
         self.set_progress(0)
         self.set_validation_status("PDF recebido. Iniciando processamento...", warning=False)
         self.log(f"PDF selecionado: {self.selected_pdf}")
-        self.root.after(100, self.start_processing)
+        self.after_ui(100, lambda: self.start_processing(job_id))
 
     # --------------------------------------------------------
 
@@ -989,16 +1160,25 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def start_processing(self):
+    def start_processing(self, job_id: int):
+        if job_id != self.current_job_id:
+            return
+
         valid, message = self.validate_inputs()
 
         if not valid:
+            self.processing_busy = False
             messagebox.showerror("Atencao", message)
             return
+
+        self.cancel_event = threading.Event()
+        cancel_event = self.cancel_event
+        input_pdf = self.selected_pdf
 
         self.btn_select.config(state="disabled")
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
+        self.btn_cancel.config(state="normal")
         self.btn_select.config(text="Processando PDF...")
 
         self.last_report = None
@@ -1009,20 +1189,25 @@ class AutoOCRApp:
 
         self.worker_thread = threading.Thread(
             target=self.processing_worker,
+            args=(job_id, input_pdf, cancel_event),
             daemon=True,
         )
         self.worker_thread.start()
 
     # --------------------------------------------------------
 
-    def processing_worker(self):
+    def processing_worker(
+        self,
+        job_id: int,
+        input_pdf: Path | None,
+        cancel_event: threading.Event,
+    ):
         try:
-            if self.selected_pdf is None:
+            if input_pdf is None:
                 raise RuntimeError("Nenhum PDF selecionado.")
 
-            input_pdf = self.selected_pdf
             output_pdf = safe_output_path(input_pdf)
-            self.output_pdf = output_pdf
+            self.after_ui(0, lambda: self.set_output_for_job(job_id, output_pdf))
 
             self.log(f"Arquivo de entrada: {input_pdf}")
             self.log(f"Arquivo de saida: {output_pdf}")
@@ -1036,9 +1221,9 @@ class AutoOCRApp:
                 dpi=DEFAULT_DPI,
                 progress_callback=self.log,
                 progress_percent_callback=lambda value: self.progress_queue.put(value),
+                cancel_event=cancel_event,
             )
 
-            self.last_report = report
             self.log(
                 "Validacao: "
                 f"{report.pages} paginas, {report.pages_with_text} com texto pesquisavel."
@@ -1047,19 +1232,39 @@ class AutoOCRApp:
                 self.log(f"Alerta: {warning}")
 
             self.log("Processamento concluido.")
-            self.root.after(0, self.processing_success)
+            self.after_ui(0, lambda: self.processing_success(job_id, report, output_pdf))
+
+        except ProcessingCancelled as e:
+            self.log(str(e))
+            self.after_ui(0, lambda: self.processing_cancelled(job_id))
 
         except Exception as e:
             error_message = str(e)
             self.log(f"Erro: {error_message}")
-            self.root.after(0, lambda: self.processing_error(error_message))
+            self.after_ui(0, lambda: self.processing_error(job_id, error_message))
 
         finally:
-            self.root.after(0, self.finish_processing)
+            self.after_ui(0, lambda: self.finish_processing(job_id))
 
     # --------------------------------------------------------
 
-    def processing_success(self):
+    def is_active_job(self, job_id: int) -> bool:
+        return job_id == self.current_job_id and job_id not in self.cancelled_job_ids
+
+    # --------------------------------------------------------
+
+    def set_output_for_job(self, job_id: int, output_pdf: Path):
+        if self.is_active_job(job_id):
+            self.output_pdf = output_pdf
+
+    # --------------------------------------------------------
+
+    def processing_success(self, job_id: int, report: PdfValidationReport, output_pdf: Path):
+        if not self.is_active_job(job_id):
+            return
+
+        self.last_report = report
+        self.output_pdf = output_pdf
         self.set_status("PDF OCR criado e validado.")
         self.set_progress(100)
 
@@ -1082,15 +1287,54 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def processing_error(self, error_message: str):
+    def processing_error(self, job_id: int, error_message: str):
+        if not self.is_active_job(job_id):
+            return
+
         self.set_status("Erro ao processar PDF.")
         self.set_validation_status("Falha na validacao ou no processamento", warning=True)
         messagebox.showerror("Erro ao processar PDF", error_message)
 
     # --------------------------------------------------------
 
-    def finish_processing(self):
+    def processing_cancelled(self, job_id: int):
+        if job_id != self.current_job_id:
+            return
+
+        self.set_status("OCR cancelado.")
+        self.set_validation_status("Processamento cancelado. Nenhum PDF final foi liberado.", warning=True)
+        self.log("OCR cancelado pelo usuario.")
+
+    # --------------------------------------------------------
+
+    def cancel_processing(self):
+        if not self.processing_busy:
+            return
+
+        self.cancel_event.set()
+        self.cancelled_job_ids.add(self.current_job_id)
+        self.processing_busy = False
+        self.btn_cancel.config(state="disabled")
         self.btn_select.config(state="normal")
+        self.btn_select.config(text="Selecionar outro PDF")
+        self.btn_open_pdf.config(state="disabled")
+        self.btn_open_folder.config(state="disabled")
+        self.output_pdf = None
+        self.last_report = None
+        self.set_status("OCR cancelado. Selecione outro PDF.")
+        self.set_validation_status("Cancelado. Pronto para receber outro PDF.", warning=True)
+        self.log("Cancelamento solicitado. Voce ja pode selecionar ou arrastar outro PDF.")
+
+    # --------------------------------------------------------
+
+    def finish_processing(self, job_id: int):
+        if job_id != self.current_job_id:
+            return
+
+        self.processing_busy = False
+        self.cancelled_job_ids.discard(job_id)
+        self.btn_select.config(state="normal")
+        self.btn_cancel.config(state="disabled")
         self.btn_select.config(text="Selecionar outro PDF")
 
     # --------------------------------------------------------
@@ -1137,22 +1381,28 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def process_queues(self):
-        try:
-            while True:
-                msg = self.log_queue.get_nowait()
-                self.append_log(msg)
-                self.set_status(msg)
-        except queue.Empty:
-            pass
+        if self.closing:
+            return
 
         try:
-            while True:
-                value = self.progress_queue.get_nowait()
-                self.set_progress(value)
-        except queue.Empty:
-            pass
+            try:
+                while True:
+                    msg = self.log_queue.get_nowait()
+                    self.append_log(msg)
+                    self.set_status(msg)
+            except queue.Empty:
+                pass
 
-        self.root.after(120, self.process_queues)
+            try:
+                while True:
+                    value = self.progress_queue.get_nowait()
+                    self.set_progress(value)
+            except queue.Empty:
+                pass
+        except tk.TclError:
+            return
+
+        self.after_ui(120, self.process_queues)
 
     # --------------------------------------------------------
 
