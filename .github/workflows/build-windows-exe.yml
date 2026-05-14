@@ -45,6 +45,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "vendor\tessdata" | Out-Null
 
           Copy-Item "$tesseractRoot\*" "vendor\tesseract" -Recurse -Force
+          Remove-Item "vendor\tesseract\tessdata" -Recurse -Force -ErrorAction SilentlyContinue
           Copy-Item "$tesseractRoot\tessdata\*" "vendor\tessdata" -Recurse -Force
 
           Invoke-WebRequest `

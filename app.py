@@ -17,11 +17,6 @@ import pytesseract
 from PIL import Image
 from pypdf import PdfWriter, PdfReader
 
-try:
-    import pikepdf
-except Exception:
-    pikepdf = None
-
 
 APP_NAME = "Auto OCR PDF"
 APP_VERSION = "1.2.0"
@@ -425,21 +420,6 @@ def optimize_pdf_size(pdf_path: Path, progress_callback) -> Path:
     except Exception as e:
         mupdf_path.unlink(missing_ok=True)
         progress_callback(f"Limpeza estrutural nao aplicada: {e}")
-
-    if pikepdf is not None:
-        qpdf_path = make_temp_output_path(pdf_path)
-        try:
-            with pikepdf.Pdf.open(str(best_path)) as pdf:
-                pdf.save(
-                    str(qpdf_path),
-                    compress_streams=True,
-                    recompress_flate=True,
-                    object_stream_mode=pikepdf.ObjectStreamMode.generate,
-                )
-            accept_candidate(qpdf_path)
-        except Exception as e:
-            qpdf_path.unlink(missing_ok=True)
-            progress_callback(f"Compactacao qpdf nao aplicada: {e}")
 
     if best_path == pdf_path:
         progress_callback("Compactacao sem ganho relevante; mantendo PDF validado.")
