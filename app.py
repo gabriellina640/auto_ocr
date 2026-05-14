@@ -17,6 +17,13 @@ import pytesseract
 from PIL import Image
 from pypdf import PdfWriter, PdfReader
 
+windnd = None
+if os.name == "nt":
+    try:
+        import windnd
+    except Exception:
+        windnd = None
+
 
 APP_NAME = "Auto OCR PDF"
 APP_VERSION = "1.2.0"
@@ -57,12 +64,12 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def is_macos() -> bool:
-    return sys.platform == "darwin"
-
-
 def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def create_root_window() -> tk.Tk:
+    return tk.Tk()
 
 
 def hidden_subprocess_kwargs() -> dict:
@@ -99,10 +106,8 @@ def open_file(path: Path):
     try:
         if is_windows():
             os.startfile(path)
-        elif is_macos():
-            subprocess.run(["open", str(path)], check=False)
         else:
-            subprocess.run(["xdg-open", str(path)], check=False)
+            messagebox.showwarning("Atencao", "Abrir arquivo e suportado no EXE Windows.")
     except Exception as e:
         messagebox.showerror("Erro", f"Nao foi possivel abrir o arquivo:\n\n{e}")
 
@@ -113,16 +118,15 @@ def open_folder(path: Path):
 
         if is_windows():
             os.startfile(folder)
-        elif is_macos():
-            subprocess.run(["open", str(folder)], check=False)
         else:
-            subprocess.run(["xdg-open", str(folder)], check=False)
+            messagebox.showwarning("Atencao", "Abrir pasta e suportado no EXE Windows.")
     except Exception as e:
         messagebox.showerror("Erro", f"Nao foi possivel abrir a pasta:\n\n{e}")
 
 
 def safe_output_path(input_pdf: Path) -> Path:
-    base = input_pdf.with_name(f"{input_pdf.stem}_OCR.pdf")
+    output_dir = app_base_dir()
+    base = output_dir / f"{input_pdf.stem}_OCR.pdf"
 
     if not base.exists():
         return base
@@ -633,6 +637,7 @@ class AutoOCRApp:
 
         self.setup_style()
         self.create_layout()
+        self.configure_drag_and_drop()
         self.process_queues()
 
     # --------------------------------------------------------
@@ -773,7 +778,7 @@ class AutoOCRApp:
 
         self.file_path_label = tk.Label(
             upload_area,
-            text="Escolha o PDF do SAJ para gerar uma copia pesquisavel sem alterar o original.",
+            text="Clique ou arraste o PDF aqui. A copia pesquisavel sera salva na pasta do app.",
             font=("Segoe UI", 10),
             bg=COLOR_CARD_ALT,
             fg=COLOR_MUTED,
@@ -788,6 +793,42 @@ class AutoOCRApp:
             primary=True,
         )
         self.btn_select.pack(pady=(0, 4), ipadx=6)
+
+    # --------------------------------------------------------
+
+    def configure_drag_and_drop(self):
+        registered = self.register_windnd_target_tree(self.root)
+        if registered:
+            self.log("Arraste um PDF para qualquer area da janela para iniciar.")
+        else:
+            self.log("Arrastar e soltar indisponivel; use o botao Selecionar PDF.")
+
+    def register_windnd_target_tree(self, widget) -> bool:
+        registered = self.register_windnd_target(widget)
+        for child in widget.winfo_children():
+            registered = self.register_windnd_target_tree(child) or registered
+        return registered
+
+    # --------------------------------------------------------
+
+    def register_windnd_target(self, widget) -> bool:
+        if windnd is None:
+            return False
+
+        try:
+            windnd.hook_dropfiles(widget, func=self.handle_windnd_drop)
+            return True
+        except Exception:
+            return False
+
+    # --------------------------------------------------------
+
+    def handle_windnd_drop(self, files):
+        if not files:
+            return
+
+        path = os.fsdecode(files[0])
+        self.root.after(0, lambda: self.load_pdf(Path(path)))
 
     # --------------------------------------------------------
 
@@ -887,7 +928,7 @@ class AutoOCRApp:
             insertbackground="#ffffff",
             relief="flat",
             borderwidth=0,
-            font=("Menlo", 10) if is_macos() else ("Consolas", 10),
+            font=("Consolas", 10),
         )
         self.log_text.pack(fill="both", expand=True, padx=18, pady=(0, 18))
 
@@ -902,7 +943,16 @@ class AutoOCRApp:
         if not pdf_file:
             return
 
-        self.selected_pdf = Path(pdf_file)
+        self.load_pdf(Path(pdf_file))
+
+    # --------------------------------------------------------
+
+    def load_pdf(self, pdf_path: Path):
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showwarning("Atencao", "Aguarde o processamento atual terminar.")
+            return
+
+        self.selected_pdf = pdf_path
         self.output_pdf = None
         self.last_report = None
 
@@ -1121,7 +1171,7 @@ class AutoOCRApp:
 # ============================================================
 
 def main():
-    root = tk.Tk()
+    root = create_root_window()
     AutoOCRApp(root)
     root.mainloop()
 

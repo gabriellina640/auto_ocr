@@ -5,7 +5,7 @@ Cria uma copia pesquisavel de um PDF do SAJ sem alterar o arquivo original.
 Fluxo para o usuario:
 
 1. Abrir o AutoOCRPDF.exe
-2. Selecionar o PDF
+2. Selecionar ou arrastar o PDF
 3. Aguardar o processamento automatico
 4. Abrir arquivo_OCR.pdf
 
@@ -50,7 +50,7 @@ python3 app.py
 SEGURANCA
 
 - O original nunca e sobrescrito.
-- O resultado e salvo com sufixo _OCR.
+- O resultado e salvo na pasta do app com sufixo _OCR.
 - Se ja existir, o app adiciona timestamp.
 - O app nao remove senha, nao quebra protecao e nao desbloqueia assinatura.
 - PDFs assinados podem gerar uma copia visual com OCR, mas a assinatura digital nao permanece valida nessa copia.

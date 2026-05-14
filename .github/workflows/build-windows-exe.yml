@@ -153,6 +153,7 @@ jobs:
             --onefile `
             --windowed `
             --clean `
+            --hidden-import "windnd" `
             --add-data "vendor\tesseract;vendor\tesseract" `
             --add-data "vendor\tessdata;vendor\tessdata" `
             app.py
