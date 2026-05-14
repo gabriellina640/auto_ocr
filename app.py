@@ -17,27 +17,34 @@ import pytesseract
 from PIL import Image
 from pypdf import PdfWriter, PdfReader
 
+try:
+    import pikepdf
+except Exception:
+    pikepdf = None
+
 
 APP_NAME = "Auto OCR PDF"
 APP_VERSION = "1.2.0"
 DEFAULT_LANGUAGE = "por"
-DEFAULT_DPI = 400
+DEFAULT_DPI = 300
 PAGE_SIZE_TOLERANCE = 2.0
 
-COLOR_BG = "#f6f8fb"
-COLOR_CARD = "#ffffff"
-COLOR_CARD_ALT = "#ecfeff"
-COLOR_BORDER = "#d8e0ea"
-COLOR_PRIMARY = "#2563eb"
-COLOR_PRIMARY_DARK = "#1d4ed8"
+COLOR_BG = "#07111f"
+COLOR_CARD = "#0f1b2e"
+COLOR_CARD_ALT = "#0c2f3c"
+COLOR_BORDER = "#24445f"
+COLOR_PRIMARY = "#0f766e"
+COLOR_PRIMARY_DARK = "#115e59"
+COLOR_SECONDARY = "#1d4ed8"
+COLOR_SECONDARY_DARK = "#1e3a8a"
 COLOR_SUCCESS = "#15803d"
 COLOR_SUCCESS_DARK = "#166534"
 COLOR_WARNING = "#f59e0b"
-COLOR_TEXT = "#111827"
-COLOR_MUTED = "#64748b"
-COLOR_LOG_BG = "#0f172a"
-COLOR_LOG_TEXT = "#e5e7eb"
-COLOR_CYAN = "#0e7490"
+COLOR_TEXT = "#f8fafc"
+COLOR_MUTED = "#cbd5e1"
+COLOR_LOG_BG = "#020617"
+COLOR_LOG_TEXT = "#e2e8f0"
+COLOR_CYAN = "#155e75"
 
 
 @dataclass(frozen=True)
@@ -361,6 +368,91 @@ def publish_validated_pdf(input_pdf: Path, temp_pdf: Path, output_pdf: Path) -> 
     return report
 
 
+def format_file_size(size_bytes: int) -> str:
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def optimize_pdf_size(pdf_path: Path, progress_callback) -> Path:
+    original_size = pdf_path.stat().st_size
+    best_path = pdf_path
+    best_size = original_size
+
+    def accept_candidate(candidate_path: Path) -> bool:
+        nonlocal best_path, best_size
+
+        if not candidate_path.exists() or candidate_path.stat().st_size == 0:
+            candidate_path.unlink(missing_ok=True)
+            return False
+
+        try:
+            with fitz.open(str(candidate_path)):
+                pass
+            PdfReader(str(candidate_path))
+        except Exception:
+            candidate_path.unlink(missing_ok=True)
+            return False
+
+        candidate_size = candidate_path.stat().st_size
+        if candidate_size < best_size:
+            if best_path != pdf_path:
+                best_path.unlink(missing_ok=True)
+            best_path = candidate_path
+            best_size = candidate_size
+            return True
+
+        candidate_path.unlink(missing_ok=True)
+        return False
+
+    mupdf_path = make_temp_output_path(pdf_path)
+    try:
+        with fitz.open(str(best_path)) as document:
+            document.save(
+                str(mupdf_path),
+                garbage=4,
+                clean=True,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+                compression_effort=9,
+            )
+        accept_candidate(mupdf_path)
+    except Exception as e:
+        mupdf_path.unlink(missing_ok=True)
+        progress_callback(f"Limpeza estrutural nao aplicada: {e}")
+
+    if pikepdf is not None:
+        qpdf_path = make_temp_output_path(pdf_path)
+        try:
+            with pikepdf.Pdf.open(str(best_path)) as pdf:
+                pdf.save(
+                    str(qpdf_path),
+                    compress_streams=True,
+                    recompress_flate=True,
+                    object_stream_mode=pikepdf.ObjectStreamMode.generate,
+                )
+            accept_candidate(qpdf_path)
+        except Exception as e:
+            qpdf_path.unlink(missing_ok=True)
+            progress_callback(f"Compactacao qpdf nao aplicada: {e}")
+
+    if best_path == pdf_path:
+        progress_callback("Compactacao sem ganho relevante; mantendo PDF validado.")
+        return pdf_path
+
+    pdf_path.unlink(missing_ok=True)
+    progress_callback(
+        "Tamanho reduzido: "
+        f"{format_file_size(original_size)} -> {format_file_size(best_size)}."
+    )
+    return best_path
+
+
 # ============================================================
 # PROCESSAMENTO OCR
 # ============================================================
@@ -426,6 +518,9 @@ def run_compatibility_mode(
             writer.write(f)
 
         progress_percent_callback(95)
+        progress_callback("Compactando PDF final...")
+        temp_output = optimize_pdf_size(temp_output, progress_callback)
+        progress_percent_callback(98)
         progress_callback("Validando PDF final...")
         report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
         progress_percent_callback(100)
@@ -443,13 +538,94 @@ def run_compatibility_mode(
 # INTERFACE
 # ============================================================
 
+class ActionButton(tk.Frame):
+    def __init__(self, parent, text: str, command, primary: bool = False):
+        super().__init__(parent, bd=0, highlightthickness=0)
+        self.command = command
+        self.primary = primary
+        self.state = "normal"
+        self.text = text
+
+        self.normal_bg = COLOR_PRIMARY if primary else COLOR_SECONDARY
+        self.active_bg = COLOR_PRIMARY_DARK if primary else COLOR_SECONDARY_DARK
+        self.disabled_bg = "#334155"
+        self.normal_fg = "#ffffff"
+        self.disabled_fg = "#e2e8f0"
+
+        self.label = tk.Label(
+            self,
+            text=text,
+            font=("Segoe UI", 10, "bold"),
+            padx=18,
+            pady=13,
+            width=28,
+            anchor="center",
+            cursor="hand2",
+        )
+        self.label.pack(fill="both", expand=True)
+
+        self.bind("<Button-1>", self._click)
+        self.label.bind("<Button-1>", self._click)
+        self.bind("<Enter>", self._enter)
+        self.label.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.label.bind("<Leave>", self._leave)
+
+        self._paint(self.normal_bg)
+
+    def _paint(self, bg: str):
+        fg = self.disabled_fg if self.state == "disabled" else self.normal_fg
+        self.configure(bg=bg)
+        self.label.configure(bg=bg, fg=fg)
+
+    def _click(self, _event=None):
+        if self.state != "disabled":
+            self.command()
+
+    def _enter(self, _event=None):
+        if self.state != "disabled":
+            self._paint(self.active_bg)
+
+    def _leave(self, _event=None):
+        self._paint(self.disabled_bg if self.state == "disabled" else self.normal_bg)
+
+    def config(self, cnf=None, **kwargs):
+        if cnf:
+            kwargs.update(cnf)
+
+        if "text" in kwargs:
+            self.text = kwargs.pop("text")
+            self.label.configure(text=self.text)
+
+        if "state" in kwargs:
+            self.state = kwargs.pop("state")
+            if self.state == "disabled":
+                self.label.configure(cursor="arrow")
+                self._paint(self.disabled_bg)
+            else:
+                self.label.configure(cursor="hand2")
+                self._paint(self.normal_bg)
+
+        if kwargs:
+            super().config(**kwargs)
+
+    configure = config
+
+    def cget(self, key):
+        if key == "text":
+            return self.text
+        if key == "state":
+            return self.state
+        return super().cget(key)
+
+
 class AutoOCRApp:
     def __init__(self, root: tk.Tk):
         self.root = root
 
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("980x720")
-        self.root.minsize(720, 620)
+        self.root.geometry("1180x820")
+        self.root.minsize(980, 720)
         self.root.configure(bg=COLOR_BG)
 
         self.selected_pdf: Path | None = None
@@ -475,7 +651,7 @@ class AutoOCRApp:
             pass
 
         default_font = ("Segoe UI", 10)
-        title_font = ("Segoe UI", 24, "bold")
+        title_font = ("Segoe UI", 28, "bold")
         heading_font = ("Segoe UI", 13, "bold")
         button_font = ("Segoe UI", 10, "bold")
 
@@ -486,11 +662,11 @@ class AutoOCRApp:
         style.configure("CardText.TLabel", background=COLOR_CARD, foreground=COLOR_TEXT)
         style.configure("Hint.TLabel", font=("Segoe UI", 9), background=COLOR_CARD, foreground=COLOR_MUTED)
         style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"), background=COLOR_CARD, foreground=COLOR_TEXT)
-        style.configure("Success.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_SUCCESS)
-        style.configure("Warning.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground=COLOR_WARNING)
+        style.configure("Success.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground="#86efac")
+        style.configure("Warning.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground="#fbbf24")
         style.configure("Primary.TButton", font=button_font, padding=(14, 10))
         style.configure("Secondary.TButton", padding=(10, 7))
-        style.configure("TProgressbar", troughcolor="#dbeafe", background=COLOR_PRIMARY, bordercolor="#dbeafe")
+        style.configure("TProgressbar", troughcolor="#1e293b", background="#22d3ee", bordercolor="#1e293b")
 
     # --------------------------------------------------------
 
@@ -512,28 +688,8 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def make_action_button(self, parent, text: str, command, primary: bool = False) -> tk.Button:
-        bg = COLOR_PRIMARY if primary else "#e2e8f0"
-        fg = "#ffffff" if primary else COLOR_TEXT
-        active_bg = COLOR_PRIMARY_DARK if primary else "#cbd5e1"
-
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=bg,
-            fg=fg,
-            activebackground=active_bg,
-            activeforeground=fg,
-            disabledforeground="#94a3b8",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-            borderwidth=0,
-            padx=16,
-            pady=10,
-            cursor="hand2",
-            wraplength=260,
-        )
+    def make_action_button(self, parent, text: str, command, primary: bool = False) -> ActionButton:
+        return ActionButton(parent, text=text, command=command, primary=primary)
 
     # --------------------------------------------------------
 
@@ -567,8 +723,8 @@ class AutoOCRApp:
 
         content = tk.Frame(main, bg=COLOR_BG)
         content.pack(fill="both", expand=True, pady=(22, 0))
-        content.grid_columnconfigure(0, weight=3, minsize=360)
-        content.grid_columnconfigure(1, weight=1, minsize=240)
+        content.grid_columnconfigure(0, weight=3, minsize=560)
+        content.grid_columnconfigure(1, weight=1, minsize=320)
         content.grid_rowconfigure(0, weight=1)
 
         left = tk.Frame(content, bg=COLOR_BG)
@@ -593,9 +749,9 @@ class AutoOCRApp:
         upload_area = tk.Frame(
             card,
             bg=COLOR_CARD_ALT,
-            highlightbackground="#67e8f9",
-            highlightthickness=1,
-            height=190,
+            highlightbackground="#22d3ee",
+            highlightthickness=2,
+            height=220,
         )
         upload_area.pack(fill="x", padx=18, pady=(4, 18))
         upload_area.pack_propagate(False)
@@ -609,7 +765,7 @@ class AutoOCRApp:
             width=5,
             height=1,
         )
-        icon.pack(pady=(22, 8))
+        icon.pack(pady=(26, 10))
 
         self.file_title_label = tk.Label(
             upload_area,
@@ -623,12 +779,12 @@ class AutoOCRApp:
         self.file_path_label = tk.Label(
             upload_area,
             text="Escolha o PDF do SAJ para gerar uma copia pesquisavel sem alterar o original.",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 10),
             bg=COLOR_CARD_ALT,
             fg=COLOR_MUTED,
-            wraplength=680,
+            wraplength=820,
         )
-        self.file_path_label.pack(pady=(5, 12))
+        self.file_path_label.pack(pady=(5, 16))
 
         self.btn_select = self.make_action_button(
             upload_area,
