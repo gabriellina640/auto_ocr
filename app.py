@@ -65,6 +65,20 @@ def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def hidden_subprocess_kwargs() -> dict:
+    if not is_windows():
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+
+    kwargs = {"startupinfo": startupinfo}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
+
+
 def app_base_dir() -> Path:
     if is_frozen_app():
         return Path(sys.executable).resolve().parent
@@ -256,6 +270,7 @@ def run_tesseract_pdf(image: Image.Image, output_base: Path, language: str, dpi:
         command,
         capture_output=True,
         env=env,
+        **hidden_subprocess_kwargs(),
     )
 
     stderr = result.stderr.decode(errors="replace").strip()
