@@ -5,6 +5,7 @@ import queue
 import tempfile
 import threading
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -380,6 +381,37 @@ def make_temp_output_path(output_pdf: Path) -> Path:
     return Path(name)
 
 
+def make_page_temp_dir() -> Path:
+    return Path(tempfile.mkdtemp(prefix="auto_ocr_pages_"))
+
+
+def cleanup_temp_tree(
+    temp_dir: Path,
+    progress_callback,
+    attempts: int = 5,
+    delay_seconds: float = 0.2,
+) -> bool:
+    if not temp_dir.exists():
+        return True
+
+    for attempt in range(1, attempts + 1):
+        try:
+            shutil.rmtree(temp_dir)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            if attempt == attempts:
+                progress_callback(
+                    "Aviso: nao foi possivel remover a pasta temporaria "
+                    f"{temp_dir}: {e}"
+                )
+                return False
+            time.sleep(delay_seconds)
+
+    return False
+
+
 def validate_pdf_output(input_pdf: Path, output_pdf: Path) -> PdfValidationReport:
     warnings: list[str] = []
 
@@ -541,7 +573,7 @@ def run_compatibility_mode(
     zoom = dpi / 72
     matrix = fitz.Matrix(zoom, zoom)
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="auto_ocr_pages_", dir=str(output_pdf.parent)))
+    temp_dir = make_page_temp_dir()
     temp_output = make_temp_output_path(output_pdf)
 
     try:
@@ -593,7 +625,7 @@ def run_compatibility_mode(
 
     finally:
         document.close()
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        cleanup_temp_tree(temp_dir, progress_callback)
         if temp_output.exists():
             temp_output.unlink(missing_ok=True)
 
@@ -696,6 +728,7 @@ class AutoOCRApp:
         self.output_pdf: Path | None = None
         self.last_report: PdfValidationReport | None = None
         self.worker_thread: threading.Thread | None = None
+        self.active_worker_threads: set[threading.Thread] = set()
         self.processing_busy = False
         self.upload_area: tk.Frame | None = None
         self.cancel_event = threading.Event()
@@ -742,6 +775,9 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def close_app(self):
+        if self.closing:
+            return
+
         self.closing = True
         self.cancel_event.set()
 
@@ -752,6 +788,35 @@ class AutoOCRApp:
                 pass
             self.after_ids.discard(after_id)
 
+        if self.has_active_workers():
+            self.wait_for_workers_before_close()
+            return
+
+        self.destroy_root()
+
+    # --------------------------------------------------------
+
+    def has_active_workers(self) -> bool:
+        self.active_worker_threads = {
+            thread for thread in self.active_worker_threads if thread.is_alive()
+        }
+        return bool(self.active_worker_threads)
+
+    # --------------------------------------------------------
+
+    def wait_for_workers_before_close(self):
+        if self.has_active_workers():
+            try:
+                self.root.after(50, self.wait_for_workers_before_close)
+            except tk.TclError:
+                pass
+            return
+
+        self.destroy_root()
+
+    # --------------------------------------------------------
+
+    def destroy_root(self):
         try:
             self.root.destroy()
         except tk.TclError:
@@ -1192,6 +1257,7 @@ class AutoOCRApp:
             args=(job_id, input_pdf, cancel_event),
             daemon=True,
         )
+        self.active_worker_threads.add(self.worker_thread)
         self.worker_thread.start()
 
     # --------------------------------------------------------
@@ -1244,6 +1310,7 @@ class AutoOCRApp:
             self.after_ui(0, lambda: self.processing_error(job_id, error_message))
 
         finally:
+            self.active_worker_threads.discard(threading.current_thread())
             self.after_ui(0, lambda: self.finish_processing(job_id))
 
     # --------------------------------------------------------
