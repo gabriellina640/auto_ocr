@@ -805,7 +805,7 @@ class AutoOCRApp:
         self.root = root
 
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1240x840")
+        self.root.geometry("1360x900")
         self.root.minsize(1040, 740)
         self.root.configure(bg=COLOR_BG)
 
