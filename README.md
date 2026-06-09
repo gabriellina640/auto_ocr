@@ -9,7 +9,9 @@ Fluxo para o usuario:
 3. Aguardar o processamento automatico
 4. Abrir arquivo_OCR.pdf
 
-Nao existem configuracoes para o usuario final. O app usa automaticamente o modo de maior fidelidade visual para PDFs do SAJ.
+O usuario pode ativar "Reduzir tamanho do PDF final" antes de selecionar o PDF.
+Sem ativar, o app usa o modo fiel de maior preservacao visual.
+Ativado, o app usa compressao forte para reduzir o arquivo e manter o PDF pesquisavel.
 
 O PDF final recebe camada de texto pesquisavel/selecionavel e passa por validacao tecnica antes de ser liberado.
 Durante o processamento, o botao Cancelar OCR interrompe a geracao e remove arquivos temporarios.

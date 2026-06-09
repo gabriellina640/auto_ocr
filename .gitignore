@@ -3,7 +3,10 @@ AGENTS.md
 /.codex-kit
 __pycache__/
 *.pyc
+.DS_Store
 build/
 dist/
 *.spec
 *.tmp.pdf
+*_OCR.pdf
+*_OCR_*.pdf

@@ -40,22 +40,25 @@ DEFAULT_LANGUAGE = "por"
 DEFAULT_DPI = 300
 PAGE_SIZE_TOLERANCE = 2.0
 
-COLOR_BG = "#07111f"
-COLOR_CARD = "#0f1b2e"
-COLOR_CARD_ALT = "#0c2f3c"
-COLOR_BORDER = "#24445f"
-COLOR_PRIMARY = "#0f766e"
-COLOR_PRIMARY_DARK = "#115e59"
-COLOR_SECONDARY = "#1d4ed8"
-COLOR_SECONDARY_DARK = "#1e3a8a"
-COLOR_SUCCESS = "#15803d"
-COLOR_SUCCESS_DARK = "#166534"
-COLOR_WARNING = "#f59e0b"
-COLOR_TEXT = "#f8fafc"
-COLOR_MUTED = "#cbd5e1"
-COLOR_LOG_BG = "#020617"
-COLOR_LOG_TEXT = "#e2e8f0"
-COLOR_CYAN = "#155e75"
+COLOR_BG = "#f6f7f9"
+COLOR_CARD = "#ffffff"
+COLOR_CARD_ALT = "#fafafa"
+COLOR_BORDER = "#d9dee7"
+COLOR_PRIMARY = "#8a1538"
+COLOR_PRIMARY_DARK = "#6d102c"
+COLOR_SECONDARY = "#ffffff"
+COLOR_SECONDARY_DARK = "#f3f4f6"
+COLOR_SUCCESS = "#166534"
+COLOR_SUCCESS_DARK = "#14532d"
+COLOR_WARNING = "#92400e"
+COLOR_TEXT = "#111827"
+COLOR_MUTED = "#4b5563"
+COLOR_LOG_BG = "#ffffff"
+COLOR_LOG_TEXT = "#111827"
+COLOR_CYAN = "#8a1538"
+COLOR_DISABLED_BG = "#e5e7eb"
+COLOR_DISABLED_TEXT = "#4b5563"
+COLOR_ON_PRIMARY = "#ffffff"
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,39 @@ class PdfValidationReport:
     pages: int
     pages_with_text: int
     warnings: list[str]
+
+
+@dataclass(frozen=True)
+class CompressionProfile:
+    key: str
+    label: str
+    description: str
+    dpi: int
+    image_format: str
+    jpeg_quality: int | None = None
+
+
+COMPRESSION_PROFILES = {
+    "faithful": CompressionProfile(
+        key="faithful",
+        label="Fiel",
+        description="Maior fidelidade visual, arquivo maior.",
+        dpi=DEFAULT_DPI,
+        image_format="PNG",
+    ),
+    "compressed": CompressionProfile(
+        key="compressed",
+        label="Reduzido",
+        description="Compressao mais forte para tentar ficar abaixo de 200 MB.",
+        dpi=180,
+        image_format="JPEG",
+        jpeg_quality=58,
+    ),
+}
+
+
+def compression_profile_for_reduce_size(reduce_size: bool) -> CompressionProfile:
+    return COMPRESSION_PROFILES["compressed" if reduce_size else "faithful"]
 
 
 class ProcessingCancelled(Exception):
@@ -269,6 +305,51 @@ def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     return image
 
 
+def make_ocr_image_path(output_base: Path, compression_profile: CompressionProfile) -> Path:
+    suffix = ".jpg" if compression_profile.image_format == "JPEG" else ".png"
+    return output_base.with_suffix(suffix)
+
+
+def prepare_ocr_image(
+    image: Image.Image,
+    compression_profile: CompressionProfile,
+    source_dpi: int = DEFAULT_DPI,
+) -> Image.Image:
+    prepared = image if image.mode == "RGB" else image.convert("RGB")
+
+    if compression_profile.dpi < source_dpi:
+        scale = compression_profile.dpi / source_dpi
+        width = max(1, int(prepared.width * scale))
+        height = max(1, int(prepared.height * scale))
+        try:
+            resampling_filter = Image.Resampling.LANCZOS
+        except AttributeError:
+            resampling_filter = Image.LANCZOS
+        prepared = prepared.resize((width, height), resampling_filter)
+
+    prepared.info["dpi"] = (compression_profile.dpi, compression_profile.dpi)
+    return prepared
+
+
+def save_ocr_image(
+    image: Image.Image,
+    image_path: Path,
+    compression_profile: CompressionProfile,
+):
+    save_options = {
+        "format": compression_profile.image_format,
+        "dpi": (compression_profile.dpi, compression_profile.dpi),
+    }
+
+    if compression_profile.image_format == "JPEG":
+        save_options.update(
+            quality=compression_profile.jpeg_quality,
+            optimize=True,
+        )
+
+    image.save(image_path, **save_options)
+
+
 def raise_if_cancelled(cancel_event: threading.Event | None):
     if cancel_event is not None and cancel_event.is_set():
         raise ProcessingCancelled("Processamento cancelado pelo usuario.")
@@ -279,18 +360,17 @@ def run_tesseract_pdf(
     output_base: Path,
     language: str,
     dpi: int,
+    compression_profile: CompressionProfile | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
     raise_if_cancelled(cancel_event)
 
-    image_path = output_base.with_suffix(".png")
+    compression_profile = compression_profile or COMPRESSION_PROFILES["faithful"]
+    image = prepare_ocr_image(image, compression_profile, source_dpi=dpi)
+    image_path = make_ocr_image_path(output_base, compression_profile)
     output_pdf = output_base.with_suffix(".pdf")
 
-    image.save(
-        image_path,
-        format="PNG",
-        dpi=(dpi, dpi),
-    )
+    save_ocr_image(image, image_path, compression_profile)
 
     command = [
         pytesseract.pytesseract.tesseract_cmd or "tesseract",
@@ -552,6 +632,7 @@ def run_compatibility_mode(
     dpi: int,
     progress_callback,
     progress_percent_callback,
+    compression_profile: CompressionProfile | None = None,
     cancel_event: threading.Event | None = None,
 ) -> PdfValidationReport:
     """
@@ -560,7 +641,9 @@ def run_compatibility_mode(
     Preserva pagina, proporcao e dimensao fisica para reduzir risco visual.
     """
     raise_if_cancelled(cancel_event)
+    compression_profile = compression_profile or COMPRESSION_PROFILES["faithful"]
     progress_callback("Abrindo PDF...")
+    progress_callback(f"Compressao final: {compression_profile.label}")
 
     document = fitz.open(str(input_pdf))
     total_pages = document.page_count
@@ -594,6 +677,7 @@ def run_compatibility_mode(
                 output_base=temp_page_base,
                 language=language,
                 dpi=dpi,
+                compression_profile=compression_profile,
                 cancel_event=cancel_event,
             )
 
@@ -636,23 +720,24 @@ def run_compatibility_mode(
 
 class ActionButton(tk.Frame):
     def __init__(self, parent, text: str, command, primary: bool = False):
-        super().__init__(parent, bd=0, highlightthickness=0)
+        border_color = COLOR_PRIMARY if primary else COLOR_BORDER
+        super().__init__(parent, bd=0, highlightthickness=1, highlightbackground=border_color)
         self.command = command
         self.primary = primary
         self.state = "normal"
         self.text = text
 
-        self.normal_bg = COLOR_PRIMARY if primary else COLOR_SECONDARY
-        self.active_bg = COLOR_PRIMARY_DARK if primary else COLOR_SECONDARY_DARK
-        self.disabled_bg = "#334155"
-        self.normal_fg = "#ffffff"
-        self.disabled_fg = "#e2e8f0"
+        self.normal_bg = COLOR_CARD_ALT if primary else COLOR_SECONDARY
+        self.active_bg = "#f3e4e8" if primary else COLOR_SECONDARY_DARK
+        self.disabled_bg = COLOR_DISABLED_BG
+        self.normal_fg = COLOR_TEXT
+        self.disabled_fg = COLOR_DISABLED_TEXT
 
         self.label = tk.Label(
             self,
             text=text,
             font=("Segoe UI", 10, "bold"),
-            padx=18,
+            padx=20,
             pady=13,
             width=28,
             anchor="center",
@@ -720,8 +805,8 @@ class AutoOCRApp:
         self.root = root
 
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1180x820")
-        self.root.minsize(980, 720)
+        self.root.geometry("1240x840")
+        self.root.minsize(1040, 740)
         self.root.configure(bg=COLOR_BG)
 
         self.selected_pdf: Path | None = None
@@ -736,6 +821,14 @@ class AutoOCRApp:
         self.cancelled_job_ids: set[int] = set()
         self.closing = False
         self.after_ids: set[str] = set()
+        self.reduce_size = tk.BooleanVar(value=False)
+        self.pending_compression_profile: CompressionProfile | None = None
+        self.compression_controls_enabled = True
+        self.compression_controls: list[tk.Widget] = []
+        self.compression_toggle: tk.Frame | None = None
+        self.compression_badge_label: tk.Label | None = None
+        self.compression_title_label: tk.Label | None = None
+        self.compression_description_label: tk.Label | None = None
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.progress_queue: queue.Queue[int] = queue.Queue()
@@ -837,23 +930,14 @@ class AutoOCRApp:
         except Exception:
             pass
 
-        default_font = ("Segoe UI", 10)
-        title_font = ("Segoe UI", 28, "bold")
-        heading_font = ("Segoe UI", 13, "bold")
-        button_font = ("Segoe UI", 10, "bold")
-
-        style.configure(".", font=default_font, background=COLOR_BG, foreground=COLOR_TEXT)
-        style.configure("Title.TLabel", font=title_font, background=COLOR_BG, foreground=COLOR_TEXT)
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 10), background=COLOR_BG, foreground=COLOR_MUTED)
-        style.configure("CardTitle.TLabel", font=heading_font, background=COLOR_CARD, foreground=COLOR_TEXT)
-        style.configure("CardText.TLabel", background=COLOR_CARD, foreground=COLOR_TEXT)
-        style.configure("Hint.TLabel", font=("Segoe UI", 9), background=COLOR_CARD, foreground=COLOR_MUTED)
-        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"), background=COLOR_CARD, foreground=COLOR_TEXT)
-        style.configure("Success.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground="#86efac")
-        style.configure("Warning.TLabel", font=("Segoe UI", 9, "bold"), background=COLOR_CARD, foreground="#fbbf24")
-        style.configure("Primary.TButton", font=button_font, padding=(14, 10))
-        style.configure("Secondary.TButton", padding=(10, 7))
-        style.configure("TProgressbar", troughcolor="#1e293b", background="#22d3ee", bordercolor="#1e293b")
+        style.configure(
+            "TProgressbar",
+            troughcolor="#eceff3",
+            background=COLOR_PRIMARY,
+            bordercolor=COLOR_BORDER,
+            lightcolor=COLOR_PRIMARY,
+            darkcolor=COLOR_PRIMARY,
+        )
 
     # --------------------------------------------------------
 
@@ -868,8 +952,22 @@ class AutoOCRApp:
         card.pack(**pack_options)
 
         if title:
-            label = ttk.Label(card, text=title, style="CardTitle.TLabel")
-            label.pack(anchor="w", padx=18, pady=(16, 8))
+            header = tk.Frame(card, bg=COLOR_CARD)
+            header.pack(fill="x", padx=20, pady=(18, 12))
+
+            accent = tk.Frame(header, bg=COLOR_PRIMARY, width=4, height=22)
+            accent.pack(side="left", padx=(0, 10))
+            accent.pack_propagate(False)
+
+            label = tk.Label(
+                header,
+                text=title,
+                bg=COLOR_CARD,
+                fg=COLOR_TEXT,
+                font=("Segoe UI", 13, "bold"),
+                anchor="w",
+            )
+            label.pack(side="left", fill="x", expand=True)
 
         return card
 
@@ -882,34 +980,48 @@ class AutoOCRApp:
 
     def create_layout(self):
         main = tk.Frame(self.root, bg=COLOR_BG)
-        main.pack(fill="both", expand=True, padx=26, pady=24)
+        main.pack(fill="both", expand=True, padx=30, pady=26)
 
         header = tk.Frame(main, bg=COLOR_BG)
         header.pack(fill="x")
 
-        badge = tk.Label(
-            header,
-            text="SAJ OCR",
-            bg=COLOR_SUCCESS,
-            fg="#ffffff",
-            font=("Segoe UI", 9, "bold"),
-            padx=10,
-            pady=4,
-        )
-        badge.pack(anchor="w", pady=(0, 8))
+        accent_line = tk.Frame(header, bg=COLOR_PRIMARY, height=4, width=72)
+        accent_line.pack(anchor="w", pady=(0, 12))
+        accent_line.pack_propagate(False)
 
-        title = ttk.Label(header, text="Auto OCR PDF", style="Title.TLabel")
+        kicker = tk.Label(
+            header,
+            text="MPAC | SAJ OCR",
+            bg=COLOR_BG,
+            fg=COLOR_PRIMARY,
+            font=("Segoe UI", 9, "bold"),
+        )
+        kicker.pack(anchor="w", pady=(0, 6))
+
+        title = tk.Label(
+            header,
+            text="Auto OCR PDF",
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 30, "bold"),
+            anchor="w",
+        )
         title.pack(anchor="w")
 
-        subtitle = ttk.Label(
+        subtitle = tk.Label(
             header,
-            text="Selecione o PDF do SAJ. O app gera uma copia fiel, pesquisavel e validada.",
-            style="Subtitle.TLabel",
+            text="Selecione o PDF do SAJ. O app gera uma copia pesquisavel, validada e pronta para uso.",
+            bg=COLOR_BG,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+            wraplength=900,
+            justify="left",
         )
         subtitle.pack(anchor="w", pady=(4, 0))
 
         content = tk.Frame(main, bg=COLOR_BG)
-        content.pack(fill="both", expand=True, pady=(22, 0))
+        content.pack(fill="both", expand=True, pady=(24, 0))
         content.grid_columnconfigure(0, weight=3, minsize=560)
         content.grid_columnconfigure(1, weight=1, minsize=320)
         content.grid_rowconfigure(0, weight=1)
@@ -921,6 +1033,7 @@ class AutoOCRApp:
         right.grid(row=0, column=1, sticky="nsew", padx=(22, 0))
 
         self.create_file_card(left)
+        self.create_compression_card(left)
         self.create_progress_card(left)
         self.create_log_card(left)
 
@@ -935,32 +1048,39 @@ class AutoOCRApp:
 
         upload_area = tk.Frame(
             card,
-            bg=COLOR_CARD_ALT,
-            highlightbackground="#22d3ee",
+            bg=COLOR_CARD,
+            highlightbackground=COLOR_PRIMARY,
             highlightthickness=2,
-            height=220,
+            height=230,
         )
         self.upload_area = upload_area
-        upload_area.pack(fill="x", padx=18, pady=(4, 18))
+        upload_area.pack(fill="x", padx=20, pady=(0, 20))
         upload_area.pack_propagate(False)
 
+        icon_row = tk.Frame(upload_area, bg=COLOR_CARD)
+        icon_row.pack(pady=(28, 10))
+
         icon = tk.Label(
-            upload_area,
+            icon_row,
             text="PDF",
-            font=("Segoe UI", 18, "bold"),
-            bg=COLOR_CYAN,
-            fg="#ffffff",
-            width=5,
-            height=1,
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD,
+            fg=COLOR_PRIMARY,
+            padx=14,
+            pady=5,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
         )
-        icon.pack(pady=(26, 10))
+        icon.pack()
 
         self.file_title_label = tk.Label(
             upload_area,
             text="Selecione o PDF do SAJ",
             font=("Segoe UI", 12, "bold"),
-            bg=COLOR_CARD_ALT,
+            bg=COLOR_CARD,
             fg=COLOR_TEXT,
+            wraplength=520,
+            justify="center",
         )
         self.file_title_label.pack()
 
@@ -968,11 +1088,11 @@ class AutoOCRApp:
             upload_area,
             text="Clique ou arraste o PDF aqui. A copia pesquisavel sera salva na pasta do app.",
             font=("Segoe UI", 10),
-            bg=COLOR_CARD_ALT,
+            bg=COLOR_CARD,
             fg=COLOR_MUTED,
-            wraplength=820,
+            wraplength=520,
         )
-        self.file_path_label.pack(pady=(5, 16))
+        self.file_path_label.pack(pady=(6, 18))
 
         self.btn_select = self.make_action_button(
             upload_area,
@@ -981,6 +1101,86 @@ class AutoOCRApp:
             primary=True,
         )
         self.btn_select.pack(pady=(0, 4), ipadx=6)
+
+    # --------------------------------------------------------
+
+    def create_compression_card(self, parent):
+        card = self.make_card(parent, "Reducao de tamanho", fill="x", pady=(18, 0))
+
+        self.compression_toggle = tk.Frame(
+            card,
+            bg=COLOR_CARD,
+            highlightthickness=2,
+            highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_BORDER,
+            cursor="hand2",
+        )
+        self.compression_toggle.pack(fill="x", padx=18, pady=(0, 12))
+        self.compression_controls.append(self.compression_toggle)
+
+        self.compression_badge_label = tk.Label(
+            self.compression_toggle,
+            text="PADRAO",
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 9, "bold"),
+            width=9,
+            padx=8,
+            pady=6,
+            cursor="hand2",
+        )
+        self.compression_badge_label.pack(side="left", padx=(14, 12), pady=14)
+
+        text_area = tk.Frame(self.compression_toggle, bg=COLOR_CARD, cursor="hand2")
+        text_area.pack(side="left", fill="both", expand=True, padx=(0, 14), pady=12)
+        self.compression_controls.append(text_area)
+
+        self.compression_title_label = tk.Label(
+            text_area,
+            text="",
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.compression_title_label.pack(anchor="w", fill="x")
+
+        self.compression_description_label = tk.Label(
+            text_area,
+            text="",
+            bg=COLOR_CARD,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=520,
+            justify="left",
+            cursor="hand2",
+        )
+        self.compression_description_label.pack(anchor="w", fill="x", pady=(3, 0))
+
+        for widget in (
+            self.compression_toggle,
+            self.compression_badge_label,
+            text_area,
+            self.compression_title_label,
+            self.compression_description_label,
+        ):
+            widget.bind("<Button-1>", self.toggle_reduce_size)
+
+        hint = tk.Label(
+            card,
+            text="Clique aqui antes de selecionar o PDF. O modo escolhido fica travado durante o processamento.",
+            bg=COLOR_CARD,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=520,
+            justify="left",
+        )
+        hint.pack(anchor="w", padx=18, pady=(0, 18))
+
+        self.refresh_compression_toggle()
 
     # --------------------------------------------------------
 
@@ -1055,12 +1255,15 @@ class AutoOCRApp:
     def create_progress_card(self, parent):
         card = self.make_card(parent, "Progresso", fill="x", pady=(18, 0))
 
-        self.status_label = ttk.Label(
+        self.status_label = tk.Label(
             card,
             text="Aguardando selecao do PDF...",
-            style="Status.TLabel",
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
         )
-        self.status_label.pack(anchor="w", padx=18, pady=(2, 8))
+        self.status_label.pack(anchor="w", fill="x", padx=20, pady=(0, 10))
 
         self.progress = ttk.Progressbar(
             card,
@@ -1068,14 +1271,39 @@ class AutoOCRApp:
             maximum=100,
             value=0,
         )
-        self.progress.pack(fill="x", padx=18, pady=(0, 6))
+        self.progress.pack(fill="x", padx=20, pady=(0, 8))
 
-        self.progress_percent_label = ttk.Label(
+        self.progress_percent_label = tk.Label(
             card,
             text="0%",
-            style="Hint.TLabel",
+            bg=COLOR_CARD,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9),
+            anchor="e",
         )
-        self.progress_percent_label.pack(anchor="e", padx=18, pady=(0, 10))
+        self.progress_percent_label.pack(anchor="e", padx=20, pady=(0, 18))
+
+    # --------------------------------------------------------
+
+    def create_validation_card(self, parent):
+        card = self.make_card(parent, "Garantia", fill="x")
+
+        self.validation_status_label = tk.Label(
+            card,
+            text="Pronto para receber um PDF",
+            bg=COLOR_CARD,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9, "bold"),
+            wraplength=280,
+            justify="left",
+            anchor="w",
+        )
+        self.validation_status_label.pack(anchor="w", fill="x", padx=20, pady=(0, 18))
+
+    # --------------------------------------------------------
+
+    def create_actions_card(self, parent):
+        card = self.make_card(parent, "Resultado", fill="x", pady=(18, 0))
 
         self.btn_cancel = self.make_action_button(
             card,
@@ -1084,25 +1312,7 @@ class AutoOCRApp:
             primary=False,
         )
         self.btn_cancel.config(state="disabled")
-        self.btn_cancel.pack(anchor="w", padx=18, pady=(0, 16))
-
-    # --------------------------------------------------------
-
-    def create_validation_card(self, parent):
-        card = self.make_card(parent, "Garantia", fill="x")
-
-        self.validation_status_label = ttk.Label(
-            card,
-            text="Pronto para receber um PDF",
-            style="Hint.TLabel",
-            wraplength=280,
-        )
-        self.validation_status_label.pack(anchor="w", padx=18, pady=(0, 16))
-
-    # --------------------------------------------------------
-
-    def create_actions_card(self, parent):
-        card = self.make_card(parent, "Resultado", fill="x", pady=(18, 0))
+        self.btn_cancel.pack(fill="x", padx=18, pady=(0, 8))
 
         self.btn_open_pdf = self.make_action_button(
             card,
@@ -1133,14 +1343,17 @@ class AutoOCRApp:
             "A copia so e liberada depois de conferir paginas, tamanho e texto pesquisavel."
         )
 
-        label = ttk.Label(
+        label = tk.Label(
             card,
             text=text,
             wraplength=280,
             justify="left",
-            style="CardText.TLabel",
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 10),
+            anchor="nw",
         )
-        label.pack(anchor="nw", padx=18, pady=(0, 18))
+        label.pack(anchor="nw", fill="x", padx=20, pady=(0, 20))
 
     # --------------------------------------------------------
 
@@ -1154,12 +1367,14 @@ class AutoOCRApp:
             state="disabled",
             bg=COLOR_LOG_BG,
             fg=COLOR_LOG_TEXT,
-            insertbackground="#ffffff",
+            insertbackground=COLOR_TEXT,
             relief="flat",
             borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
             font=("Consolas", 10),
         )
-        self.log_text.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self.log_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
     # --------------------------------------------------------
 
@@ -1186,22 +1401,109 @@ class AutoOCRApp:
             return
 
         job_id = self.current_job_id + 1
+        compression_profile = self.selected_compression_profile()
         self.current_job_id = job_id
         self.processing_busy = True
         self.selected_pdf = pdf_path
         self.output_pdf = None
         self.last_report = None
+        self.pending_compression_profile = compression_profile
 
         self.file_title_label.config(text=self.selected_pdf.name)
         self.file_path_label.config(text=str(self.selected_pdf))
 
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
+        self.set_compression_controls_state("disabled")
 
         self.set_progress(0)
         self.set_validation_status("PDF recebido. Iniciando processamento...", warning=False)
         self.log(f"PDF selecionado: {self.selected_pdf}")
+        self.log(f"Modo escolhido: {compression_profile.label}")
         self.after_ui(100, lambda: self.start_processing(job_id))
+
+    # --------------------------------------------------------
+
+    def selected_compression_profile(self) -> CompressionProfile:
+        return compression_profile_for_reduce_size(self.reduce_size.get())
+
+    # --------------------------------------------------------
+
+    def toggle_reduce_size(self, _event=None):
+        if not self.compression_controls_enabled:
+            return
+
+        self.reduce_size.set(not self.reduce_size.get())
+        self.refresh_compression_toggle()
+
+    # --------------------------------------------------------
+
+    def refresh_compression_toggle(self):
+        if self.compression_toggle is None:
+            return
+
+        enabled = self.compression_controls_enabled
+        active = bool(self.reduce_size.get())
+        background = COLOR_CARD_ALT if active else COLOR_CARD
+        border = COLOR_PRIMARY if active else COLOR_BORDER
+        badge_bg = "#f3e4e8" if active else COLOR_CARD
+        badge_fg = COLOR_TEXT
+        text_color = COLOR_TEXT if enabled else "#94a3b8"
+        muted_color = COLOR_MUTED if enabled else "#64748b"
+        cursor = "hand2" if enabled else "arrow"
+
+        self.compression_toggle.config(
+            bg=background,
+            highlightbackground=border,
+            highlightcolor=border,
+            cursor=cursor,
+        )
+
+        if self.compression_badge_label is not None:
+            self.compression_badge_label.config(
+                text="ATIVO" if active else "PADRAO",
+                bg=badge_bg,
+                fg=badge_fg,
+                cursor=cursor,
+            )
+
+        if self.compression_title_label is not None:
+            self.compression_title_label.config(
+                text="Compressao forte ligada" if active else "Modo fiel sem compressao",
+                bg=background,
+                fg=text_color,
+                cursor=cursor,
+            )
+
+        if self.compression_description_label is not None:
+            description = (
+                "Reduz ao maximo com JPEG otimizado e mantem a validacao de paginas e texto pesquisavel."
+                if active
+                else "Preserva a maior fidelidade visual; o arquivo final pode ficar bem maior."
+            )
+            self.compression_description_label.config(
+                text=description,
+                bg=background,
+                fg=muted_color,
+                cursor=cursor,
+            )
+
+        for control in self.compression_controls:
+            try:
+                control.config(bg=background, cursor=cursor)
+            except tk.TclError:
+                pass
+
+    # --------------------------------------------------------
+
+    def set_compression_controls_state(self, state: str):
+        self.compression_controls_enabled = state != "disabled"
+        for control in self.compression_controls:
+            try:
+                control.config(state=state)
+            except tk.TclError:
+                pass
+        self.refresh_compression_toggle()
 
     # --------------------------------------------------------
 
@@ -1233,28 +1535,33 @@ class AutoOCRApp:
 
         if not valid:
             self.processing_busy = False
+            self.pending_compression_profile = None
+            self.set_compression_controls_state("normal")
             messagebox.showerror("Atencao", message)
             return
 
         self.cancel_event = threading.Event()
         cancel_event = self.cancel_event
         input_pdf = self.selected_pdf
+        compression_profile = self.pending_compression_profile or self.selected_compression_profile()
 
         self.btn_select.config(state="disabled")
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
         self.btn_cancel.config(state="normal")
         self.btn_select.config(text="Processando PDF...")
+        self.set_compression_controls_state("disabled")
 
         self.last_report = None
         self.set_progress(0)
         self.set_status("Iniciando OCR...")
         self.set_validation_status("Processando...", warning=False)
         self.log("Iniciando processamento...")
+        self.log(f"Modo de compressao: {compression_profile.label}")
 
         self.worker_thread = threading.Thread(
             target=self.processing_worker,
-            args=(job_id, input_pdf, cancel_event),
+            args=(job_id, input_pdf, cancel_event, compression_profile),
             daemon=True,
         )
         self.active_worker_threads.add(self.worker_thread)
@@ -1267,6 +1574,7 @@ class AutoOCRApp:
         job_id: int,
         input_pdf: Path | None,
         cancel_event: threading.Event,
+        compression_profile: CompressionProfile,
     ):
         try:
             if input_pdf is None:
@@ -1287,6 +1595,7 @@ class AutoOCRApp:
                 dpi=DEFAULT_DPI,
                 progress_callback=self.log,
                 progress_percent_callback=lambda value: self.progress_queue.put(value),
+                compression_profile=compression_profile,
                 cancel_event=cancel_event,
             )
 
@@ -1384,10 +1693,12 @@ class AutoOCRApp:
         self.btn_cancel.config(state="disabled")
         self.btn_select.config(state="normal")
         self.btn_select.config(text="Selecionar outro PDF")
+        self.set_compression_controls_state("normal")
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
         self.output_pdf = None
         self.last_report = None
+        self.pending_compression_profile = None
         self.set_status("OCR cancelado. Selecione outro PDF.")
         self.set_validation_status("Cancelado. Pronto para receber outro PDF.", warning=True)
         self.log("Cancelamento solicitado. Voce ja pode selecionar ou arrastar outro PDF.")
@@ -1403,6 +1714,8 @@ class AutoOCRApp:
         self.btn_select.config(state="normal")
         self.btn_cancel.config(state="disabled")
         self.btn_select.config(text="Selecionar outro PDF")
+        self.set_compression_controls_state("normal")
+        self.pending_compression_profile = None
 
     # --------------------------------------------------------
 
@@ -1435,8 +1748,8 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def set_validation_status(self, text: str, warning: bool):
-        style = "Warning.TLabel" if warning else "Success.TLabel"
-        self.validation_status_label.config(text=text, style=style)
+        color = COLOR_WARNING if warning else COLOR_SUCCESS
+        self.validation_status_label.config(text=text, fg=color)
 
     # --------------------------------------------------------
 
