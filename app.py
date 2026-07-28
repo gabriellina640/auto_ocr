@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 import fitz  # PyMuPDF
@@ -40,25 +41,46 @@ DEFAULT_LANGUAGE = "por"
 DEFAULT_DPI = 300
 PAGE_SIZE_TOLERANCE = 2.0
 
-COLOR_BG = "#f6f7f9"
+COLOR_BG = "#f5f6f8"
 COLOR_CARD = "#ffffff"
-COLOR_CARD_ALT = "#fafafa"
-COLOR_BORDER = "#d9dee7"
-COLOR_PRIMARY = "#8a1538"
-COLOR_PRIMARY_DARK = "#6d102c"
+COLOR_CARD_ALT = "#edeff2"
+COLOR_BRAND_SOFT = "#fbeaec"
+COLOR_BORDER = "#e3e6ea"
+COLOR_PRIMARY = "#a5122a"
+COLOR_PRIMARY_DARK = "#7e0e20"
 COLOR_SECONDARY = "#ffffff"
-COLOR_SECONDARY_DARK = "#f3f4f6"
-COLOR_SUCCESS = "#166534"
-COLOR_SUCCESS_DARK = "#14532d"
-COLOR_WARNING = "#92400e"
-COLOR_TEXT = "#111827"
-COLOR_MUTED = "#4b5563"
+COLOR_SECONDARY_DARK = "#edeff2"
+COLOR_SUCCESS = "#1e7137"
+COLOR_SUCCESS_BG = "#dff5e3"
+COLOR_WARNING = "#865700"
+COLOR_WARNING_BG = "#fdeccb"
+COLOR_TEXT = "#1a1a1a"
+COLOR_TEXT_DARK = "#101114"
+COLOR_MUTED = "#666b73"
 COLOR_LOG_BG = "#ffffff"
-COLOR_LOG_TEXT = "#111827"
-COLOR_CYAN = "#8a1538"
-COLOR_DISABLED_BG = "#e5e7eb"
-COLOR_DISABLED_TEXT = "#4b5563"
+COLOR_LOG_TEXT = "#3d3d3d"
+COLOR_DISABLED_BG = "#edeff2"
+COLOR_DISABLED_TEXT = "#555c64"
 COLOR_ON_PRIMARY = "#ffffff"
+FONT_SANS = "Inter"
+FONT_FALLBACK = "Segoe UI"
+
+SPACE_2 = 8
+SPACE_3 = 12
+SPACE_4 = 16
+SPACE_5 = 24
+SPACE_6 = 32
+
+
+def ui_font(size: int, weight: str | None = None) -> tuple:
+    try:
+        family = FONT_SANS if FONT_SANS in tkfont.families() else FONT_FALLBACK
+    except tk.TclError:
+        family = FONT_FALLBACK
+
+    if weight:
+        return (family, size, weight)
+    return (family, size)
 
 
 @dataclass(frozen=True)
@@ -673,18 +695,18 @@ class ActionButton(tk.Frame):
         self.state = "normal"
         self.text = text
 
-        self.normal_bg = COLOR_CARD_ALT if primary else COLOR_SECONDARY
-        self.active_bg = "#f3e4e8" if primary else COLOR_SECONDARY_DARK
+        self.normal_bg = COLOR_PRIMARY if primary else COLOR_SECONDARY
+        self.active_bg = COLOR_PRIMARY_DARK if primary else COLOR_SECONDARY_DARK
         self.disabled_bg = COLOR_DISABLED_BG
-        self.normal_fg = COLOR_TEXT
+        self.normal_fg = COLOR_ON_PRIMARY if primary else COLOR_TEXT
         self.disabled_fg = COLOR_DISABLED_TEXT
 
         self.label = tk.Label(
             self,
             text=text,
-            font=("Segoe UI", 10, "bold"),
-            padx=20,
-            pady=13,
+            font=ui_font(10, "bold"),
+            padx=SPACE_5,
+            pady=SPACE_4,
             width=28,
             anchor="center",
             cursor="hand2",
@@ -892,7 +914,7 @@ class AutoOCRApp:
 
         style.configure(
             "TProgressbar",
-            troughcolor="#eceff3",
+            troughcolor=COLOR_CARD_ALT,
             background=COLOR_PRIMARY,
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_PRIMARY,
@@ -914,10 +936,10 @@ class AutoOCRApp:
 
         if title:
             header = tk.Frame(card, bg=COLOR_CARD)
-            header.pack(fill="x", padx=20, pady=(18, 12))
+            header.pack(fill="x", padx=SPACE_5, pady=(SPACE_5, SPACE_4))
 
-            accent = tk.Frame(header, bg=COLOR_PRIMARY, width=4, height=22)
-            accent.pack(side="left", padx=(0, 10))
+            accent = tk.Frame(header, bg=COLOR_PRIMARY, width=4, height=24)
+            accent.pack(side="left", padx=(0, SPACE_3))
             accent.pack_propagate(False)
 
             label = tk.Label(
@@ -925,7 +947,7 @@ class AutoOCRApp:
                 text=title,
                 bg=COLOR_CARD,
                 fg=COLOR_TEXT,
-                font=("Segoe UI", 13, "bold"),
+                font=ui_font(13, "bold"),
                 anchor="w",
             )
             label.pack(side="left", fill="x", expand=True)
@@ -941,7 +963,7 @@ class AutoOCRApp:
 
     def create_layout(self):
         main = tk.Frame(self.root, bg=COLOR_BG)
-        main.pack(fill="both", expand=True, padx=30, pady=26)
+        main.pack(fill="both", expand=True, padx=SPACE_6, pady=SPACE_6)
 
         header = tk.Frame(main, bg=COLOR_BG)
         header.pack(fill="x")
@@ -955,7 +977,7 @@ class AutoOCRApp:
             text="MPAC | SAJ OCR",
             bg=COLOR_BG,
             fg=COLOR_PRIMARY,
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(9, "bold"),
         )
         kicker.pack(anchor="w", pady=(0, 6))
 
@@ -963,8 +985,8 @@ class AutoOCRApp:
             header,
             text="Auto OCR PDF",
             bg=COLOR_BG,
-            fg=COLOR_TEXT,
-            font=("Segoe UI", 30, "bold"),
+            fg=COLOR_TEXT_DARK,
+            font=ui_font(30, "bold"),
             anchor="w",
         )
         title.pack(anchor="w")
@@ -974,7 +996,7 @@ class AutoOCRApp:
             text="Selecione o PDF do SAJ. O app gera uma copia pesquisavel e um Markdown leve automaticamente.",
             bg=COLOR_BG,
             fg=COLOR_MUTED,
-            font=("Segoe UI", 10),
+            font=ui_font(10),
             anchor="w",
             wraplength=900,
             justify="left",
@@ -982,7 +1004,7 @@ class AutoOCRApp:
         subtitle.pack(anchor="w", pady=(4, 0))
 
         content = tk.Frame(main, bg=COLOR_BG)
-        content.pack(fill="both", expand=True, pady=(24, 0))
+        content.pack(fill="both", expand=True, pady=(SPACE_5, 0))
         content.grid_columnconfigure(0, weight=3, minsize=560)
         content.grid_columnconfigure(1, weight=1, minsize=320)
         content.grid_rowconfigure(0, weight=1)
@@ -991,7 +1013,7 @@ class AutoOCRApp:
         left.grid(row=0, column=0, sticky="nsew")
 
         right = tk.Frame(content, bg=COLOR_BG)
-        right.grid(row=0, column=1, sticky="nsew", padx=(22, 0))
+        right.grid(row=0, column=1, sticky="nsew", padx=(SPACE_5, 0))
 
         self.create_file_card(left)
         self.create_markdown_card(left)
@@ -1015,29 +1037,29 @@ class AutoOCRApp:
             height=230,
         )
         self.upload_area = upload_area
-        upload_area.pack(fill="x", padx=20, pady=(0, 20))
+        upload_area.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_5))
         upload_area.pack_propagate(False)
 
         icon_row = tk.Frame(upload_area, bg=COLOR_CARD)
-        icon_row.pack(pady=(28, 10))
+        icon_row.pack(pady=(SPACE_6, SPACE_3))
 
         icon = tk.Label(
             icon_row,
             text="PDF",
-            font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD,
+            font=ui_font(11, "bold"),
+            bg=COLOR_BRAND_SOFT,
             fg=COLOR_PRIMARY,
-            padx=14,
-            pady=5,
+            padx=SPACE_4,
+            pady=SPACE_2,
             highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
+            highlightbackground=COLOR_BRAND_SOFT,
         )
         icon.pack()
 
         self.file_title_label = tk.Label(
             upload_area,
             text="Selecione o PDF do SAJ",
-            font=("Segoe UI", 12, "bold"),
+            font=ui_font(12, "bold"),
             bg=COLOR_CARD,
             fg=COLOR_TEXT,
             wraplength=520,
@@ -1048,12 +1070,12 @@ class AutoOCRApp:
         self.file_path_label = tk.Label(
             upload_area,
             text="Clique ou arraste o PDF aqui. A copia pesquisavel sera salva na pasta do app.",
-            font=("Segoe UI", 10),
+            font=ui_font(10),
             bg=COLOR_CARD,
             fg=COLOR_MUTED,
             wraplength=520,
         )
-        self.file_path_label.pack(pady=(6, 18))
+        self.file_path_label.pack(pady=(SPACE_2, SPACE_5))
 
         self.btn_select = self.make_action_button(
             upload_area,
@@ -1066,38 +1088,38 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def create_markdown_card(self, parent):
-        card = self.make_card(parent, "Markdown automatico", fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Markdown automatico", fill="x", pady=(SPACE_5, 0))
 
         panel = tk.Frame(
             card,
-            bg=COLOR_CARD_ALT,
+            bg=COLOR_BRAND_SOFT,
             highlightthickness=2,
-            highlightbackground=COLOR_PRIMARY,
-            highlightcolor=COLOR_PRIMARY,
+            highlightbackground=COLOR_BRAND_SOFT,
+            highlightcolor=COLOR_BRAND_SOFT,
         )
-        panel.pack(fill="x", padx=18, pady=(0, 18))
+        panel.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_5))
 
         badge = tk.Label(
             panel,
             text="MD",
-            bg="#f3e4e8",
-            fg=COLOR_TEXT,
-            font=("Segoe UI", 10, "bold"),
+            bg=COLOR_CARD,
+            fg=COLOR_PRIMARY,
+            font=ui_font(10, "bold"),
             width=5,
-            padx=10,
-            pady=8,
+            padx=SPACE_3,
+            pady=SPACE_2,
         )
-        badge.pack(side="left", padx=(14, 12), pady=14)
+        badge.pack(side="left", padx=(SPACE_4, SPACE_3), pady=SPACE_4)
 
-        text_area = tk.Frame(panel, bg=COLOR_CARD_ALT)
-        text_area.pack(side="left", fill="both", expand=True, padx=(0, 14), pady=12)
+        text_area = tk.Frame(panel, bg=COLOR_BRAND_SOFT)
+        text_area.pack(side="left", fill="both", expand=True, padx=(0, SPACE_4), pady=SPACE_4)
 
         title = tk.Label(
             text_area,
             text="Geracao automatica apos validar o OCR",
-            bg=COLOR_CARD_ALT,
+            bg=COLOR_BRAND_SOFT,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 10, "bold"),
+            font=ui_font(10, "bold"),
             anchor="w",
         )
         title.pack(anchor="w", fill="x")
@@ -1105,9 +1127,9 @@ class AutoOCRApp:
         description = tk.Label(
             text_area,
             text="O app mantem o PDF pesquisavel e salva tambem um arquivo .md leve com todo o texto extraido.",
-            bg=COLOR_CARD_ALT,
+            bg=COLOR_BRAND_SOFT,
             fg=COLOR_MUTED,
-            font=("Segoe UI", 9),
+            font=ui_font(9),
             anchor="w",
             wraplength=520,
             justify="left",
@@ -1185,28 +1207,28 @@ class AutoOCRApp:
     # --------------------------------------------------------
 
     def create_progress_card(self, parent):
-        card = self.make_card(parent, "Progresso", fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Progresso", fill="x", pady=(SPACE_5, 0))
 
         summary = tk.Frame(card, bg=COLOR_CARD)
-        summary.pack(fill="x", padx=20, pady=(0, 12))
+        summary.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_4))
 
         self.progress_percent_label = tk.Label(
             summary,
             text="0%",
             bg=COLOR_CARD,
             fg=COLOR_PRIMARY,
-            font=("Segoe UI", 34, "bold"),
+            font=ui_font(34, "bold"),
             width=4,
             anchor="w",
         )
-        self.progress_percent_label.pack(side="left", padx=(0, 16))
+        self.progress_percent_label.pack(side="left", padx=(0, SPACE_4))
 
         self.status_label = tk.Label(
             summary,
             text="Aguardando selecao do PDF...",
             bg=COLOR_CARD,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 13, "bold"),
+            font=ui_font(13, "bold"),
             anchor="w",
             wraplength=760,
             justify="left",
@@ -1219,7 +1241,7 @@ class AutoOCRApp:
             maximum=100,
             value=0,
         )
-        self.progress.pack(fill="x", padx=20, pady=(0, 20), ipady=5)
+        self.progress.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_5), ipady=5)
 
     # --------------------------------------------------------
 
@@ -1231,17 +1253,17 @@ class AutoOCRApp:
             text="Pronto para receber um PDF",
             bg=COLOR_CARD,
             fg=COLOR_MUTED,
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(9, "bold"),
             wraplength=280,
             justify="left",
             anchor="w",
         )
-        self.validation_status_label.pack(anchor="w", fill="x", padx=20, pady=(0, 18))
+        self.validation_status_label.pack(anchor="w", fill="x", padx=SPACE_5, pady=(0, SPACE_5))
 
     # --------------------------------------------------------
 
     def create_actions_card(self, parent):
-        card = self.make_card(parent, "Resultado", fill="x", pady=(18, 0))
+        card = self.make_card(parent, "Resultado", fill="x", pady=(SPACE_5, 0))
 
         self.btn_cancel = self.make_action_button(
             card,
@@ -1250,7 +1272,7 @@ class AutoOCRApp:
             primary=False,
         )
         self.btn_cancel.config(state="disabled")
-        self.btn_cancel.pack(fill="x", padx=18, pady=(0, 8))
+        self.btn_cancel.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_2))
 
         self.btn_open_pdf = self.make_action_button(
             card,
@@ -1259,7 +1281,7 @@ class AutoOCRApp:
             primary=False,
         )
         self.btn_open_pdf.config(state="disabled")
-        self.btn_open_pdf.pack(fill="x", padx=18, pady=(0, 8))
+        self.btn_open_pdf.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_2))
 
         self.btn_open_markdown = self.make_action_button(
             card,
@@ -1268,7 +1290,7 @@ class AutoOCRApp:
             primary=False,
         )
         self.btn_open_markdown.config(state="disabled")
-        self.btn_open_markdown.pack(fill="x", padx=18, pady=(0, 8))
+        self.btn_open_markdown.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_2))
 
         self.btn_open_folder = self.make_action_button(
             card,
@@ -1277,12 +1299,12 @@ class AutoOCRApp:
             primary=False,
         )
         self.btn_open_folder.config(state="disabled")
-        self.btn_open_folder.pack(fill="x", padx=18, pady=(0, 18))
+        self.btn_open_folder.pack(fill="x", padx=SPACE_5, pady=(0, SPACE_5))
 
     # --------------------------------------------------------
 
     def create_help_card(self, parent):
-        card = self.make_card(parent, "Seguranca", fill="both", expand=True, pady=(18, 0))
+        card = self.make_card(parent, "Seguranca", fill="both", expand=True, pady=(SPACE_5, 0))
 
         text = (
             "O arquivo original nao e alterado.\n\n"
@@ -1298,15 +1320,15 @@ class AutoOCRApp:
             justify="left",
             bg=COLOR_CARD,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 10),
+            font=ui_font(10),
             anchor="nw",
         )
-        label.pack(anchor="nw", fill="x", padx=20, pady=(0, 20))
+        label.pack(anchor="nw", fill="x", padx=SPACE_5, pady=(0, SPACE_5))
 
     # --------------------------------------------------------
 
     def create_log_card(self, parent):
-        card = self.make_card(parent, "Log tecnico", fill="both", expand=True, pady=(18, 0))
+        card = self.make_card(parent, "Log tecnico", fill="both", expand=True, pady=(SPACE_5, 0))
 
         self.log_text = tk.Text(
             card,
@@ -1322,7 +1344,7 @@ class AutoOCRApp:
             highlightbackground=COLOR_BORDER,
             font=("Consolas", 10),
         )
-        self.log_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self.log_text.pack(fill="both", expand=True, padx=SPACE_5, pady=(0, SPACE_5))
 
     # --------------------------------------------------------
 
@@ -1364,7 +1386,7 @@ class AutoOCRApp:
         self.btn_open_folder.config(state="disabled")
 
         self.set_progress(0)
-        self.set_validation_status("PDF recebido. Iniciando processamento...", warning=False)
+        self.set_validation_status("PDF recebido. Iniciando processamento...", state="progress")
         self.log(f"PDF selecionado: {self.selected_pdf}")
         self.after_ui(100, lambda: self.start_processing(job_id))
 
@@ -1415,7 +1437,7 @@ class AutoOCRApp:
         self.last_report = None
         self.set_progress(0)
         self.set_status("Iniciando OCR...")
-        self.set_validation_status("Processando...", warning=False)
+        self.set_validation_status("Processando...", state="progress")
         self.log("Iniciando processamento...")
 
         self.worker_thread = threading.Thread(
@@ -1524,7 +1546,8 @@ class AutoOCRApp:
             )
             if self.last_report.warnings:
                 validation_text += f" | {len(self.last_report.warnings)} alerta(s)"
-            self.set_validation_status(validation_text, warning=bool(self.last_report.warnings))
+            state = "warning" if self.last_report.warnings else "success"
+            self.set_validation_status(validation_text, state=state)
 
         messagebox.showinfo(
             "Concluido",
@@ -1540,7 +1563,7 @@ class AutoOCRApp:
             return
 
         self.set_status("Erro ao processar PDF.")
-        self.set_validation_status("Falha na validacao ou no processamento", warning=True)
+        self.set_validation_status("Falha na validacao ou no processamento", state="critical")
         messagebox.showerror("Erro ao processar PDF", error_message)
 
     # --------------------------------------------------------
@@ -1550,7 +1573,10 @@ class AutoOCRApp:
             return
 
         self.set_status("OCR cancelado.")
-        self.set_validation_status("Processamento cancelado. Nenhum PDF final foi liberado.", warning=True)
+        self.set_validation_status(
+            "Processamento cancelado. Nenhum PDF final foi liberado.",
+            state="warning",
+        )
         self.log("OCR cancelado pelo usuario.")
 
     # --------------------------------------------------------
@@ -1572,7 +1598,7 @@ class AutoOCRApp:
         self.output_markdown = None
         self.last_report = None
         self.set_status("OCR cancelado. Selecione outro PDF.")
-        self.set_validation_status("Cancelado. Pronto para receber outro PDF.", warning=True)
+        self.set_validation_status("Cancelado. Pronto para receber outro PDF.", state="warning")
         self.log("Cancelamento solicitado. Voce ja pode selecionar ou arrastar outro PDF.")
 
     # --------------------------------------------------------
@@ -1633,9 +1659,16 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def set_validation_status(self, text: str, warning: bool):
-        color = COLOR_WARNING if warning else COLOR_SUCCESS
-        self.validation_status_label.config(text=text, fg=color)
+    def set_validation_status(self, text: str, state: str):
+        state_colors = {
+            "success": (COLOR_SUCCESS_BG, COLOR_SUCCESS),
+            "progress": (COLOR_WARNING_BG, COLOR_WARNING),
+            "warning": (COLOR_WARNING_BG, COLOR_WARNING),
+            "critical": (COLOR_BRAND_SOFT, COLOR_PRIMARY),
+            "neutral": (COLOR_CARD_ALT, COLOR_MUTED),
+        }
+        background, color = state_colors.get(state, state_colors["neutral"])
+        self.validation_status_label.config(text=text, fg=color, bg=background, padx=SPACE_3, pady=SPACE_2)
 
     # --------------------------------------------------------
 
