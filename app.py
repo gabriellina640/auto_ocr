@@ -537,19 +537,52 @@ def markdown_output_path_for_pdf(output_pdf: Path) -> Path:
 
 
 def normalize_markdown_text(text: str) -> str:
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    text = (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u2028", "\n")
+        .replace("\u2029", "\n")
+        .replace("\f", "\n")
+        .replace("\v", "\n")
+        .replace("\xa0", " ")
+    )
+    lines = text.split("\n")
     normalized: list[str] = []
     previous_blank = False
 
     for line in lines:
-        clean = line.rstrip()
-        is_blank = not clean.strip()
-        if is_blank and previous_blank:
+        clean = " ".join(line.replace("\t", " ").split())
+        is_blank = not clean
+        if is_blank:
+            if not previous_blank and normalized:
+                normalized.append("")
+            previous_blank = True
             continue
+
         normalized.append(clean)
-        previous_blank = is_blank
+        previous_blank = False
 
     return "\n".join(normalized).strip()
+
+
+def best_markdown_page_text(pypdf_text: str | None, pymupdf_text: str | None) -> str:
+    candidates = [
+        normalize_markdown_text(pypdf_text or ""),
+        normalize_markdown_text(pymupdf_text or ""),
+    ]
+    return max(candidates, key=len)
+
+
+def pymupdf_page_text(document, page_index: int) -> str:
+    if document is None:
+        return ""
+
+    try:
+        if page_index >= document.page_count:
+            return ""
+        return document[page_index].get_text("text") or ""
+    except Exception:
+        return ""
 
 
 def markdown_from_pdf_text(pdf_path: Path) -> str:
@@ -558,17 +591,30 @@ def markdown_from_pdf_text(pdf_path: Path) -> str:
     except Exception as e:
         raise RuntimeError(f"Nao foi possivel abrir o PDF OCR para gerar Markdown: {e}") from e
 
+    pymupdf_document = None
+    try:
+        pymupdf_document = fitz.open(str(pdf_path))
+    except Exception:
+        pymupdf_document = None
+
     sections = [f"# {pdf_path.stem}", ""]
     pages_with_text = 0
 
-    for index, page in enumerate(reader.pages, start=1):
-        text = normalize_markdown_text(page.extract_text() or "")
-        if text:
-            pages_with_text += 1
-        else:
-            text = "_Sem texto extraivel nesta pagina._"
+    try:
+        for index, page in enumerate(reader.pages, start=1):
+            text = best_markdown_page_text(
+                page.extract_text(),
+                pymupdf_page_text(pymupdf_document, index - 1),
+            )
+            if text:
+                pages_with_text += 1
+            else:
+                text = "_Sem texto extraivel nesta pagina._"
 
-        sections.extend([f"## Pagina {index}", "", text, ""])
+            sections.extend([f"## Pagina {index}", "", text, ""])
+    finally:
+        if pymupdf_document is not None:
+            pymupdf_document.close()
 
     if pages_with_text == 0:
         raise RuntimeError("Nao foi encontrado texto extraivel para gerar o Markdown.")
