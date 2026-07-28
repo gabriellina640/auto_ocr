@@ -7,13 +7,10 @@ Fluxo para o usuario:
 1. Abrir o AutoOCRPDF.exe
 2. Selecionar ou arrastar o PDF
 3. Aguardar o processamento automatico
-4. Abrir arquivo_OCR.pdf
-
-O usuario pode ativar "Reduzir tamanho do PDF final" antes de selecionar o PDF.
-Sem ativar, o app usa o modo fiel de maior preservacao visual.
-Ativado, o app usa compressao forte para reduzir o arquivo e manter o PDF pesquisavel.
+4. Abrir arquivo_OCR.pdf ou arquivo_OCR.md
 
 O PDF final recebe camada de texto pesquisavel/selecionavel e passa por validacao tecnica antes de ser liberado.
+Depois da validacao, o app gera automaticamente um Markdown leve com o texto extraido do PDF OCR.
 Durante o processamento, o botao Cancelar OCR interrompe a geracao e remove arquivos temporarios.
 
 VALIDACOES DO APP
@@ -24,6 +21,7 @@ Antes de publicar o resultado, o app confere:
 - quantidade de paginas nao mudou
 - tamanho das paginas foi preservado dentro de tolerancia
 - existe texto pesquisavel extraivel no PDF final
+- Markdown foi gerado a partir do PDF OCR validado
 
 Se a validacao falhar, o PDF temporario nao substitui o resultado final.
 
@@ -53,7 +51,7 @@ python3 app.py
 SEGURANCA
 
 - O original nunca e sobrescrito.
-- O resultado e salvo na pasta do app com sufixo _OCR.
+- Os resultados sao salvos na pasta do app com sufixo _OCR.
 - Se ja existir, o app adiciona timestamp.
 - O app nao remove senha, nao quebra protecao e nao desbloqueia assinatura.
 - PDFs assinados podem gerar uma copia visual com OCR, mas a assinatura digital nao permanece valida nessa copia.

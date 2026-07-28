@@ -113,7 +113,7 @@ jobs:
 
           input_pdf = work / "entrada.pdf"
           output_pdf = work / "saida.pdf"
-          compressed_output_pdf = work / "saida_comprimida.pdf"
+          markdown_output = work / "saida.md"
           image.save(input_pdf, "PDF", resolution=200.0)
 
           ok, message = app.check_tesseract("por")
@@ -123,6 +123,7 @@ jobs:
           report = app.run_compatibility_mode(
               input_pdf=input_pdf,
               output_pdf=output_pdf,
+              output_markdown=markdown_output,
               language=app.DEFAULT_LANGUAGE,
               dpi=app.DEFAULT_DPI,
               progress_callback=lambda _: None,
@@ -143,38 +144,9 @@ jobs:
           if "AUTO" not in text.upper():
               raise RuntimeError("OCR text was not extracted.")
 
-          compressed_report = app.run_compatibility_mode(
-              input_pdf=input_pdf,
-              output_pdf=compressed_output_pdf,
-              language=app.DEFAULT_LANGUAGE,
-              dpi=app.DEFAULT_DPI,
-              progress_callback=lambda _: None,
-              progress_percent_callback=lambda _: None,
-              compression_profile=app.compression_profile_for_reduce_size(True),
-          )
-
-          compressed_text = "\n".join(
-              page.extract_text() or "" for page in PdfReader(str(compressed_output_pdf)).pages
-          )
-          with fitz.open(str(input_pdf)) as src, fitz.open(str(compressed_output_pdf)) as dst:
-              if src.page_count != dst.page_count:
-                  raise RuntimeError("Page count changed during compressed OCR smoke test.")
-              if abs(src[0].rect.width - dst[0].rect.width) > 0.1:
-                  raise RuntimeError("Page width changed during compressed OCR smoke test.")
-              if abs(src[0].rect.height - dst[0].rect.height) > 0.1:
-                  raise RuntimeError("Page height changed during compressed OCR smoke test.")
-              filters = [
-                  dst.xref_get_key(image_info[0], "Filter")[1]
-                  for page in dst
-                  for image_info in page.get_images(full=True)
-              ]
-
-          if compressed_report.pages != 1 or compressed_report.pages_with_text != 1:
-              raise RuntimeError("Compressed OCR validation report failed.")
-          if "AUTO" not in compressed_text.upper():
-              raise RuntimeError("Compressed OCR text was not extracted.")
-          if "/DCTDecode" not in filters:
-              raise RuntimeError("Compressed OCR did not use JPEG image encoding.")
+          markdown = markdown_output.read_text(encoding="utf-8")
+          if "AUTO" not in markdown.upper():
+              raise RuntimeError("Markdown output did not include OCR text.")
 
           print("OCR smoke test passed.")
           '@ | python

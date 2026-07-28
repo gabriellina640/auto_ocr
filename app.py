@@ -68,39 +68,6 @@ class PdfValidationReport:
     warnings: list[str]
 
 
-@dataclass(frozen=True)
-class CompressionProfile:
-    key: str
-    label: str
-    description: str
-    dpi: int
-    image_format: str
-    jpeg_quality: int | None = None
-
-
-COMPRESSION_PROFILES = {
-    "faithful": CompressionProfile(
-        key="faithful",
-        label="Fiel",
-        description="Maior fidelidade visual, arquivo maior.",
-        dpi=DEFAULT_DPI,
-        image_format="PNG",
-    ),
-    "compressed": CompressionProfile(
-        key="compressed",
-        label="Reduzido",
-        description="Compressao mais forte para tentar ficar abaixo de 200 MB.",
-        dpi=180,
-        image_format="JPEG",
-        jpeg_quality=58,
-    ),
-}
-
-
-def compression_profile_for_reduce_size(reduce_size: bool) -> CompressionProfile:
-    return COMPRESSION_PROFILES["compressed" if reduce_size else "faithful"]
-
-
 class ProcessingCancelled(Exception):
     pass
 
@@ -187,7 +154,7 @@ def safe_output_path(input_pdf: Path) -> Path:
     output_dir = app_base_dir()
     base = output_dir / f"{input_pdf.stem}_OCR.pdf"
 
-    if not base.exists():
+    if not base.exists() and not base.with_suffix(".md").exists():
         return base
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -305,49 +272,18 @@ def pil_image_from_pixmap(pix: fitz.Pixmap, dpi: int) -> Image.Image:
     return image
 
 
-def make_ocr_image_path(output_base: Path, compression_profile: CompressionProfile) -> Path:
-    suffix = ".jpg" if compression_profile.image_format == "JPEG" else ".png"
-    return output_base.with_suffix(suffix)
+def make_ocr_image_path(output_base: Path) -> Path:
+    return output_base.with_suffix(".png")
 
 
-def prepare_ocr_image(
-    image: Image.Image,
-    compression_profile: CompressionProfile,
-    source_dpi: int = DEFAULT_DPI,
-) -> Image.Image:
+def prepare_ocr_image(image: Image.Image, dpi: int = DEFAULT_DPI) -> Image.Image:
     prepared = image if image.mode == "RGB" else image.convert("RGB")
-
-    if compression_profile.dpi < source_dpi:
-        scale = compression_profile.dpi / source_dpi
-        width = max(1, int(prepared.width * scale))
-        height = max(1, int(prepared.height * scale))
-        try:
-            resampling_filter = Image.Resampling.LANCZOS
-        except AttributeError:
-            resampling_filter = Image.LANCZOS
-        prepared = prepared.resize((width, height), resampling_filter)
-
-    prepared.info["dpi"] = (compression_profile.dpi, compression_profile.dpi)
+    prepared.info["dpi"] = (dpi, dpi)
     return prepared
 
 
-def save_ocr_image(
-    image: Image.Image,
-    image_path: Path,
-    compression_profile: CompressionProfile,
-):
-    save_options = {
-        "format": compression_profile.image_format,
-        "dpi": (compression_profile.dpi, compression_profile.dpi),
-    }
-
-    if compression_profile.image_format == "JPEG":
-        save_options.update(
-            quality=compression_profile.jpeg_quality,
-            optimize=True,
-        )
-
-    image.save(image_path, **save_options)
+def save_ocr_image(image: Image.Image, image_path: Path, dpi: int):
+    image.save(image_path, format="PNG", dpi=(dpi, dpi))
 
 
 def raise_if_cancelled(cancel_event: threading.Event | None):
@@ -360,17 +296,15 @@ def run_tesseract_pdf(
     output_base: Path,
     language: str,
     dpi: int,
-    compression_profile: CompressionProfile | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
     raise_if_cancelled(cancel_event)
 
-    compression_profile = compression_profile or COMPRESSION_PROFILES["faithful"]
-    image = prepare_ocr_image(image, compression_profile, source_dpi=dpi)
-    image_path = make_ocr_image_path(output_base, compression_profile)
+    image = prepare_ocr_image(image, dpi=dpi)
+    image_path = make_ocr_image_path(output_base)
     output_pdf = output_base.with_suffix(".pdf")
 
-    save_ocr_image(image, image_path, compression_profile)
+    save_ocr_image(image, image_path, dpi)
 
     command = [
         pytesseract.pytesseract.tesseract_cmd or "tesseract",
@@ -461,6 +395,18 @@ def make_temp_output_path(output_pdf: Path) -> Path:
     return Path(name)
 
 
+def make_temp_markdown_path(output_markdown: Path) -> Path:
+    output_markdown.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{output_markdown.stem}_",
+        suffix=".tmp.md",
+        dir=str(output_markdown.parent),
+    )
+    os.close(fd)
+    Path(name).unlink(missing_ok=True)
+    return Path(name)
+
+
 def make_page_temp_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="auto_ocr_pages_"))
 
@@ -545,80 +491,74 @@ def validate_pdf_output(input_pdf: Path, output_pdf: Path) -> PdfValidationRepor
     )
 
 
-def publish_validated_pdf(input_pdf: Path, temp_pdf: Path, output_pdf: Path) -> PdfValidationReport:
-    report = validate_pdf_output(input_pdf, temp_pdf)
+def publish_validated_outputs(
+    temp_pdf: Path,
+    output_pdf: Path,
+    temp_markdown: Path,
+    output_markdown: Path,
+):
+    if output_pdf.exists() or output_markdown.exists():
+        raise RuntimeError(
+            "Nao foi possivel publicar os arquivos finais porque o destino ja existe."
+        )
+
     os.replace(temp_pdf, output_pdf)
-    return report
-
-
-def format_file_size(size_bytes: int) -> str:
-    size = float(size_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
-def optimize_pdf_size(pdf_path: Path, progress_callback) -> Path:
-    original_size = pdf_path.stat().st_size
-    best_path = pdf_path
-    best_size = original_size
-
-    def accept_candidate(candidate_path: Path) -> bool:
-        nonlocal best_path, best_size
-
-        if not candidate_path.exists() or candidate_path.stat().st_size == 0:
-            candidate_path.unlink(missing_ok=True)
-            return False
-
-        try:
-            with fitz.open(str(candidate_path)):
-                pass
-            PdfReader(str(candidate_path))
-        except Exception:
-            candidate_path.unlink(missing_ok=True)
-            return False
-
-        candidate_size = candidate_path.stat().st_size
-        if candidate_size < best_size:
-            if best_path != pdf_path:
-                best_path.unlink(missing_ok=True)
-            best_path = candidate_path
-            best_size = candidate_size
-            return True
-
-        candidate_path.unlink(missing_ok=True)
-        return False
-
-    mupdf_path = make_temp_output_path(pdf_path)
     try:
-        with fitz.open(str(best_path)) as document:
-            document.save(
-                str(mupdf_path),
-                garbage=4,
-                clean=True,
-                deflate=True,
-                deflate_images=True,
-                deflate_fonts=True,
-                use_objstms=1,
-                compression_effort=9,
-            )
-        accept_candidate(mupdf_path)
+        os.replace(temp_markdown, output_markdown)
+    except Exception:
+        output_pdf.unlink(missing_ok=True)
+        raise
+
+
+def markdown_output_path_for_pdf(output_pdf: Path) -> Path:
+    return output_pdf.with_suffix(".md")
+
+
+def normalize_markdown_text(text: str) -> str:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized: list[str] = []
+    previous_blank = False
+
+    for line in lines:
+        clean = line.rstrip()
+        is_blank = not clean.strip()
+        if is_blank and previous_blank:
+            continue
+        normalized.append(clean)
+        previous_blank = is_blank
+
+    return "\n".join(normalized).strip()
+
+
+def markdown_from_pdf_text(pdf_path: Path) -> str:
+    try:
+        reader = PdfReader(str(pdf_path))
     except Exception as e:
-        mupdf_path.unlink(missing_ok=True)
-        progress_callback(f"Limpeza estrutural nao aplicada: {e}")
+        raise RuntimeError(f"Nao foi possivel abrir o PDF OCR para gerar Markdown: {e}") from e
 
-    if best_path == pdf_path:
-        progress_callback("Compactacao sem ganho relevante; mantendo PDF validado.")
-        return pdf_path
+    sections = [f"# {pdf_path.stem}", ""]
+    pages_with_text = 0
 
-    pdf_path.unlink(missing_ok=True)
-    progress_callback(
-        "Tamanho reduzido: "
-        f"{format_file_size(original_size)} -> {format_file_size(best_size)}."
-    )
-    return best_path
+    for index, page in enumerate(reader.pages, start=1):
+        text = normalize_markdown_text(page.extract_text() or "")
+        if text:
+            pages_with_text += 1
+        else:
+            text = "_Sem texto extraivel nesta pagina._"
+
+        sections.extend([f"## Pagina {index}", "", text, ""])
+
+    if pages_with_text == 0:
+        raise RuntimeError("Nao foi encontrado texto extraivel para gerar o Markdown.")
+
+    return "\n".join(sections).strip() + "\n"
+
+
+def write_markdown_from_pdf(pdf_path: Path, markdown_path: Path) -> Path:
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(markdown_path, "x", encoding="utf-8") as markdown_file:
+        markdown_file.write(markdown_from_pdf_text(pdf_path))
+    return markdown_path
 
 
 # ============================================================
@@ -628,11 +568,11 @@ def optimize_pdf_size(pdf_path: Path, progress_callback) -> Path:
 def run_compatibility_mode(
     input_pdf: Path,
     output_pdf: Path,
+    output_markdown: Path,
     language: str,
     dpi: int,
     progress_callback,
     progress_percent_callback,
-    compression_profile: CompressionProfile | None = None,
     cancel_event: threading.Event | None = None,
 ) -> PdfValidationReport:
     """
@@ -641,9 +581,7 @@ def run_compatibility_mode(
     Preserva pagina, proporcao e dimensao fisica para reduzir risco visual.
     """
     raise_if_cancelled(cancel_event)
-    compression_profile = compression_profile or COMPRESSION_PROFILES["faithful"]
     progress_callback("Abrindo PDF...")
-    progress_callback(f"Compressao final: {compression_profile.label}")
 
     document = fitz.open(str(input_pdf))
     total_pages = document.page_count
@@ -658,6 +596,7 @@ def run_compatibility_mode(
 
     temp_dir = make_page_temp_dir()
     temp_output = make_temp_output_path(output_pdf)
+    temp_markdown = make_temp_markdown_path(output_markdown)
 
     try:
         for page_index in range(total_pages):
@@ -677,7 +616,6 @@ def run_compatibility_mode(
                 output_base=temp_page_base,
                 language=language,
                 dpi=dpi,
-                compression_profile=compression_profile,
                 cancel_event=cancel_event,
             )
 
@@ -697,14 +635,20 @@ def run_compatibility_mode(
 
         raise_if_cancelled(cancel_event)
         progress_percent_callback(95)
-        progress_callback("Compactando PDF final...")
-        temp_output = optimize_pdf_size(temp_output, progress_callback)
-        raise_if_cancelled(cancel_event)
-        progress_percent_callback(98)
         progress_callback("Validando PDF final...")
-        report = publish_validated_pdf(input_pdf, temp_output, output_pdf)
+        report = validate_pdf_output(input_pdf, temp_output)
+
+        raise_if_cancelled(cancel_event)
+        progress_percent_callback(97)
+        progress_callback("Gerando Markdown final...")
+        write_markdown_from_pdf(temp_output, temp_markdown)
+
+        raise_if_cancelled(cancel_event)
+        progress_percent_callback(99)
+        progress_callback("Publicando arquivos finais...")
+        publish_validated_outputs(temp_output, output_pdf, temp_markdown, output_markdown)
         progress_percent_callback(100)
-        progress_callback("PDF OCR criado e validado com sucesso.")
+        progress_callback("PDF OCR e Markdown criados com sucesso.")
         return report
 
     finally:
@@ -712,6 +656,8 @@ def run_compatibility_mode(
         cleanup_temp_tree(temp_dir, progress_callback)
         if temp_output.exists():
             temp_output.unlink(missing_ok=True)
+        if temp_markdown.exists():
+            temp_markdown.unlink(missing_ok=True)
 
 
 # ============================================================
@@ -808,9 +754,11 @@ class AutoOCRApp:
         self.root.geometry("1360x900")
         self.root.minsize(1040, 740)
         self.root.configure(bg=COLOR_BG)
+        self.maximize_root_window()
 
         self.selected_pdf: Path | None = None
         self.output_pdf: Path | None = None
+        self.output_markdown: Path | None = None
         self.last_report: PdfValidationReport | None = None
         self.worker_thread: threading.Thread | None = None
         self.active_worker_threads: set[threading.Thread] = set()
@@ -821,16 +769,9 @@ class AutoOCRApp:
         self.cancelled_job_ids: set[int] = set()
         self.closing = False
         self.after_ids: set[str] = set()
-        self.reduce_size = tk.BooleanVar(value=False)
-        self.pending_compression_profile: CompressionProfile | None = None
-        self.compression_controls_enabled = True
-        self.compression_controls: list[tk.Widget] = []
-        self.compression_toggle: tk.Frame | None = None
-        self.compression_badge_label: tk.Label | None = None
-        self.compression_title_label: tk.Label | None = None
-        self.compression_description_label: tk.Label | None = None
 
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.status_queue: queue.Queue[str] = queue.Queue()
         self.progress_queue: queue.Queue[int] = queue.Queue()
 
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
@@ -838,6 +779,25 @@ class AutoOCRApp:
         self.create_layout()
         self.configure_drag_and_drop()
         self.process_queues()
+
+    # --------------------------------------------------------
+
+    def maximize_root_window(self):
+        try:
+            self.root.state("zoomed")
+            return
+        except tk.TclError:
+            pass
+
+        try:
+            self.root.attributes("-zoomed", True)
+            return
+        except tk.TclError:
+            pass
+
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_width}x{screen_height}+0+0")
 
     # --------------------------------------------------------
 
@@ -937,6 +897,7 @@ class AutoOCRApp:
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_PRIMARY,
             darkcolor=COLOR_PRIMARY,
+            thickness=26,
         )
 
     # --------------------------------------------------------
@@ -1010,7 +971,7 @@ class AutoOCRApp:
 
         subtitle = tk.Label(
             header,
-            text="Selecione o PDF do SAJ. O app gera uma copia pesquisavel, validada e pronta para uso.",
+            text="Selecione o PDF do SAJ. O app gera uma copia pesquisavel e um Markdown leve automaticamente.",
             bg=COLOR_BG,
             fg=COLOR_MUTED,
             font=("Segoe UI", 10),
@@ -1033,7 +994,7 @@ class AutoOCRApp:
         right.grid(row=0, column=1, sticky="nsew", padx=(22, 0))
 
         self.create_file_card(left)
-        self.create_compression_card(left)
+        self.create_markdown_card(left)
         self.create_progress_card(left)
         self.create_log_card(left)
 
@@ -1104,83 +1065,54 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def create_compression_card(self, parent):
-        card = self.make_card(parent, "Reducao de tamanho", fill="x", pady=(18, 0))
+    def create_markdown_card(self, parent):
+        card = self.make_card(parent, "Markdown automatico", fill="x", pady=(18, 0))
 
-        self.compression_toggle = tk.Frame(
+        panel = tk.Frame(
             card,
-            bg=COLOR_CARD,
+            bg=COLOR_CARD_ALT,
             highlightthickness=2,
-            highlightbackground=COLOR_BORDER,
-            highlightcolor=COLOR_BORDER,
-            cursor="hand2",
+            highlightbackground=COLOR_PRIMARY,
+            highlightcolor=COLOR_PRIMARY,
         )
-        self.compression_toggle.pack(fill="x", padx=18, pady=(0, 12))
-        self.compression_controls.append(self.compression_toggle)
+        panel.pack(fill="x", padx=18, pady=(0, 18))
 
-        self.compression_badge_label = tk.Label(
-            self.compression_toggle,
-            text="PADRAO",
-            bg=COLOR_CARD,
+        badge = tk.Label(
+            panel,
+            text="MD",
+            bg="#f3e4e8",
             fg=COLOR_TEXT,
-            font=("Segoe UI", 9, "bold"),
-            width=9,
-            padx=8,
-            pady=6,
-            cursor="hand2",
+            font=("Segoe UI", 10, "bold"),
+            width=5,
+            padx=10,
+            pady=8,
         )
-        self.compression_badge_label.pack(side="left", padx=(14, 12), pady=14)
+        badge.pack(side="left", padx=(14, 12), pady=14)
 
-        text_area = tk.Frame(self.compression_toggle, bg=COLOR_CARD, cursor="hand2")
+        text_area = tk.Frame(panel, bg=COLOR_CARD_ALT)
         text_area.pack(side="left", fill="both", expand=True, padx=(0, 14), pady=12)
-        self.compression_controls.append(text_area)
 
-        self.compression_title_label = tk.Label(
+        title = tk.Label(
             text_area,
-            text="",
-            bg=COLOR_CARD,
+            text="Geracao automatica apos validar o OCR",
+            bg=COLOR_CARD_ALT,
             fg=COLOR_TEXT,
             font=("Segoe UI", 10, "bold"),
             anchor="w",
-            cursor="hand2",
         )
-        self.compression_title_label.pack(anchor="w", fill="x")
+        title.pack(anchor="w", fill="x")
 
-        self.compression_description_label = tk.Label(
+        description = tk.Label(
             text_area,
-            text="",
-            bg=COLOR_CARD,
-            fg=COLOR_MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-            wraplength=520,
-            justify="left",
-            cursor="hand2",
-        )
-        self.compression_description_label.pack(anchor="w", fill="x", pady=(3, 0))
-
-        for widget in (
-            self.compression_toggle,
-            self.compression_badge_label,
-            text_area,
-            self.compression_title_label,
-            self.compression_description_label,
-        ):
-            widget.bind("<Button-1>", self.toggle_reduce_size)
-
-        hint = tk.Label(
-            card,
-            text="Clique aqui antes de selecionar o PDF. O modo escolhido fica travado durante o processamento.",
-            bg=COLOR_CARD,
+            text="O app mantem o PDF pesquisavel e salva tambem um arquivo .md leve com todo o texto extraido.",
+            bg=COLOR_CARD_ALT,
             fg=COLOR_MUTED,
             font=("Segoe UI", 9),
             anchor="w",
             wraplength=520,
             justify="left",
         )
-        hint.pack(anchor="w", padx=18, pady=(0, 18))
-
-        self.refresh_compression_toggle()
+        description.pack(anchor="w", fill="x", pady=(3, 0))
 
     # --------------------------------------------------------
 
@@ -1255,15 +1187,31 @@ class AutoOCRApp:
     def create_progress_card(self, parent):
         card = self.make_card(parent, "Progresso", fill="x", pady=(18, 0))
 
+        summary = tk.Frame(card, bg=COLOR_CARD)
+        summary.pack(fill="x", padx=20, pady=(0, 12))
+
+        self.progress_percent_label = tk.Label(
+            summary,
+            text="0%",
+            bg=COLOR_CARD,
+            fg=COLOR_PRIMARY,
+            font=("Segoe UI", 34, "bold"),
+            width=4,
+            anchor="w",
+        )
+        self.progress_percent_label.pack(side="left", padx=(0, 16))
+
         self.status_label = tk.Label(
-            card,
+            summary,
             text="Aguardando selecao do PDF...",
             bg=COLOR_CARD,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 13, "bold"),
             anchor="w",
+            wraplength=760,
+            justify="left",
         )
-        self.status_label.pack(anchor="w", fill="x", padx=20, pady=(0, 10))
+        self.status_label.pack(side="left", fill="x", expand=True)
 
         self.progress = ttk.Progressbar(
             card,
@@ -1271,17 +1219,7 @@ class AutoOCRApp:
             maximum=100,
             value=0,
         )
-        self.progress.pack(fill="x", padx=20, pady=(0, 8))
-
-        self.progress_percent_label = tk.Label(
-            card,
-            text="0%",
-            bg=COLOR_CARD,
-            fg=COLOR_MUTED,
-            font=("Segoe UI", 9),
-            anchor="e",
-        )
-        self.progress_percent_label.pack(anchor="e", padx=20, pady=(0, 18))
+        self.progress.pack(fill="x", padx=20, pady=(0, 20), ipady=5)
 
     # --------------------------------------------------------
 
@@ -1323,6 +1261,15 @@ class AutoOCRApp:
         self.btn_open_pdf.config(state="disabled")
         self.btn_open_pdf.pack(fill="x", padx=18, pady=(0, 8))
 
+        self.btn_open_markdown = self.make_action_button(
+            card,
+            text="Abrir Markdown",
+            command=self.open_output_markdown,
+            primary=False,
+        )
+        self.btn_open_markdown.config(state="disabled")
+        self.btn_open_markdown.pack(fill="x", padx=18, pady=(0, 8))
+
         self.btn_open_folder = self.make_action_button(
             card,
             text="Abrir pasta",
@@ -1340,7 +1287,8 @@ class AutoOCRApp:
         text = (
             "O arquivo original nao e alterado.\n\n"
             "Ao selecionar o PDF, o processamento comeca automaticamente.\n\n"
-            "A copia so e liberada depois de conferir paginas, tamanho e texto pesquisavel."
+            "A copia PDF so e liberada depois de conferir paginas, tamanho e texto pesquisavel.\n\n"
+            "O Markdown e gerado a partir do PDF OCR validado."
         )
 
         label = tk.Label(
@@ -1401,109 +1349,24 @@ class AutoOCRApp:
             return
 
         job_id = self.current_job_id + 1
-        compression_profile = self.selected_compression_profile()
         self.current_job_id = job_id
         self.processing_busy = True
         self.selected_pdf = pdf_path
         self.output_pdf = None
+        self.output_markdown = None
         self.last_report = None
-        self.pending_compression_profile = compression_profile
 
         self.file_title_label.config(text=self.selected_pdf.name)
         self.file_path_label.config(text=str(self.selected_pdf))
 
         self.btn_open_pdf.config(state="disabled")
+        self.btn_open_markdown.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
-        self.set_compression_controls_state("disabled")
 
         self.set_progress(0)
         self.set_validation_status("PDF recebido. Iniciando processamento...", warning=False)
         self.log(f"PDF selecionado: {self.selected_pdf}")
-        self.log(f"Modo escolhido: {compression_profile.label}")
         self.after_ui(100, lambda: self.start_processing(job_id))
-
-    # --------------------------------------------------------
-
-    def selected_compression_profile(self) -> CompressionProfile:
-        return compression_profile_for_reduce_size(self.reduce_size.get())
-
-    # --------------------------------------------------------
-
-    def toggle_reduce_size(self, _event=None):
-        if not self.compression_controls_enabled:
-            return
-
-        self.reduce_size.set(not self.reduce_size.get())
-        self.refresh_compression_toggle()
-
-    # --------------------------------------------------------
-
-    def refresh_compression_toggle(self):
-        if self.compression_toggle is None:
-            return
-
-        enabled = self.compression_controls_enabled
-        active = bool(self.reduce_size.get())
-        background = COLOR_CARD_ALT if active else COLOR_CARD
-        border = COLOR_PRIMARY if active else COLOR_BORDER
-        badge_bg = "#f3e4e8" if active else COLOR_CARD
-        badge_fg = COLOR_TEXT
-        text_color = COLOR_TEXT if enabled else "#94a3b8"
-        muted_color = COLOR_MUTED if enabled else "#64748b"
-        cursor = "hand2" if enabled else "arrow"
-
-        self.compression_toggle.config(
-            bg=background,
-            highlightbackground=border,
-            highlightcolor=border,
-            cursor=cursor,
-        )
-
-        if self.compression_badge_label is not None:
-            self.compression_badge_label.config(
-                text="ATIVO" if active else "PADRAO",
-                bg=badge_bg,
-                fg=badge_fg,
-                cursor=cursor,
-            )
-
-        if self.compression_title_label is not None:
-            self.compression_title_label.config(
-                text="Compressao forte ligada" if active else "Modo fiel sem compressao",
-                bg=background,
-                fg=text_color,
-                cursor=cursor,
-            )
-
-        if self.compression_description_label is not None:
-            description = (
-                "Reduz ao maximo com JPEG otimizado e mantem a validacao de paginas e texto pesquisavel."
-                if active
-                else "Preserva a maior fidelidade visual; o arquivo final pode ficar bem maior."
-            )
-            self.compression_description_label.config(
-                text=description,
-                bg=background,
-                fg=muted_color,
-                cursor=cursor,
-            )
-
-        for control in self.compression_controls:
-            try:
-                control.config(bg=background, cursor=cursor)
-            except tk.TclError:
-                pass
-
-    # --------------------------------------------------------
-
-    def set_compression_controls_state(self, state: str):
-        self.compression_controls_enabled = state != "disabled"
-        for control in self.compression_controls:
-            try:
-                control.config(state=state)
-            except tk.TclError:
-                pass
-        self.refresh_compression_toggle()
 
     # --------------------------------------------------------
 
@@ -1535,33 +1398,29 @@ class AutoOCRApp:
 
         if not valid:
             self.processing_busy = False
-            self.pending_compression_profile = None
-            self.set_compression_controls_state("normal")
             messagebox.showerror("Atencao", message)
             return
 
         self.cancel_event = threading.Event()
         cancel_event = self.cancel_event
         input_pdf = self.selected_pdf
-        compression_profile = self.pending_compression_profile or self.selected_compression_profile()
 
         self.btn_select.config(state="disabled")
         self.btn_open_pdf.config(state="disabled")
+        self.btn_open_markdown.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
         self.btn_cancel.config(state="normal")
         self.btn_select.config(text="Processando PDF...")
-        self.set_compression_controls_state("disabled")
 
         self.last_report = None
         self.set_progress(0)
         self.set_status("Iniciando OCR...")
         self.set_validation_status("Processando...", warning=False)
         self.log("Iniciando processamento...")
-        self.log(f"Modo de compressao: {compression_profile.label}")
 
         self.worker_thread = threading.Thread(
             target=self.processing_worker,
-            args=(job_id, input_pdf, cancel_event, compression_profile),
+            args=(job_id, input_pdf, cancel_event),
             daemon=True,
         )
         self.active_worker_threads.add(self.worker_thread)
@@ -1574,28 +1433,30 @@ class AutoOCRApp:
         job_id: int,
         input_pdf: Path | None,
         cancel_event: threading.Event,
-        compression_profile: CompressionProfile,
     ):
         try:
             if input_pdf is None:
                 raise RuntimeError("Nenhum PDF selecionado.")
 
             output_pdf = safe_output_path(input_pdf)
-            self.after_ui(0, lambda: self.set_output_for_job(job_id, output_pdf))
+            markdown_path = markdown_output_path_for_pdf(output_pdf)
+            self.after_ui(0, lambda: self.set_outputs_for_job(job_id, output_pdf, markdown_path))
 
             self.log(f"Arquivo de entrada: {input_pdf}")
             self.log(f"Arquivo de saida: {output_pdf}")
+            self.log(f"Arquivo Markdown: {markdown_path}")
             self.log("Processamento: fidelidade alta para PDF do SAJ")
             self.log(f"Qualidade interna: {DEFAULT_DPI} DPI")
+            self.status_queue.put("Preparando OCR...")
 
             report = run_compatibility_mode(
                 input_pdf=input_pdf,
                 output_pdf=output_pdf,
+                output_markdown=markdown_path,
                 language=DEFAULT_LANGUAGE,
                 dpi=DEFAULT_DPI,
-                progress_callback=self.log,
+                progress_callback=self.report_step,
                 progress_percent_callback=lambda value: self.progress_queue.put(value),
-                compression_profile=compression_profile,
                 cancel_event=cancel_event,
             )
 
@@ -1607,7 +1468,7 @@ class AutoOCRApp:
                 self.log(f"Alerta: {warning}")
 
             self.log("Processamento concluido.")
-            self.after_ui(0, lambda: self.processing_success(job_id, report, output_pdf))
+            self.after_ui(0, lambda: self.processing_success(job_id, report, output_pdf, markdown_path))
 
         except ProcessingCancelled as e:
             self.log(str(e))
@@ -1629,28 +1490,37 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
-    def set_output_for_job(self, job_id: int, output_pdf: Path):
+    def set_outputs_for_job(self, job_id: int, output_pdf: Path, markdown_path: Path):
         if self.is_active_job(job_id):
             self.output_pdf = output_pdf
+            self.output_markdown = markdown_path
 
     # --------------------------------------------------------
 
-    def processing_success(self, job_id: int, report: PdfValidationReport, output_pdf: Path):
+    def processing_success(
+        self,
+        job_id: int,
+        report: PdfValidationReport,
+        output_pdf: Path,
+        markdown_path: Path,
+    ):
         if not self.is_active_job(job_id):
             return
 
         self.last_report = report
         self.output_pdf = output_pdf
-        self.set_status("PDF OCR criado e validado.")
+        self.output_markdown = markdown_path
+        self.set_status("PDF OCR e Markdown criados.")
         self.set_progress(100)
 
         self.btn_open_pdf.config(state="normal")
+        self.btn_open_markdown.config(state="normal")
         self.btn_open_folder.config(state="normal")
 
         if self.last_report:
             validation_text = (
                 f"OK: {self.last_report.pages} paginas | "
-                f"{self.last_report.pages_with_text} com texto pesquisavel"
+                f"{self.last_report.pages_with_text} com texto pesquisavel | Markdown gerado"
             )
             if self.last_report.warnings:
                 validation_text += f" | {len(self.last_report.warnings)} alerta(s)"
@@ -1658,7 +1528,9 @@ class AutoOCRApp:
 
         messagebox.showinfo(
             "Concluido",
-            f"PDF pesquisavel criado e validado:\n\n{self.output_pdf}",
+            "Arquivos criados e validados:\n\n"
+            f"PDF: {self.output_pdf}\n"
+            f"Markdown: {self.output_markdown}",
         )
 
     # --------------------------------------------------------
@@ -1693,12 +1565,12 @@ class AutoOCRApp:
         self.btn_cancel.config(state="disabled")
         self.btn_select.config(state="normal")
         self.btn_select.config(text="Selecionar outro PDF")
-        self.set_compression_controls_state("normal")
         self.btn_open_pdf.config(state="disabled")
+        self.btn_open_markdown.config(state="disabled")
         self.btn_open_folder.config(state="disabled")
         self.output_pdf = None
+        self.output_markdown = None
         self.last_report = None
-        self.pending_compression_profile = None
         self.set_status("OCR cancelado. Selecione outro PDF.")
         self.set_validation_status("Cancelado. Pronto para receber outro PDF.", warning=True)
         self.log("Cancelamento solicitado. Voce ja pode selecionar ou arrastar outro PDF.")
@@ -1714,8 +1586,6 @@ class AutoOCRApp:
         self.btn_select.config(state="normal")
         self.btn_cancel.config(state="disabled")
         self.btn_select.config(text="Selecionar outro PDF")
-        self.set_compression_controls_state("normal")
-        self.pending_compression_profile = None
 
     # --------------------------------------------------------
 
@@ -1727,8 +1597,18 @@ class AutoOCRApp:
 
     # --------------------------------------------------------
 
+    def open_output_markdown(self):
+        if self.output_markdown and self.output_markdown.exists():
+            open_file(self.output_markdown)
+        else:
+            messagebox.showwarning("Atencao", "Nenhum Markdown final encontrado.")
+
+    # --------------------------------------------------------
+
     def open_output_folder(self):
-        if self.output_pdf:
+        if self.output_markdown:
+            open_folder(self.output_markdown)
+        elif self.output_pdf:
             open_folder(self.output_pdf)
         elif self.selected_pdf:
             open_folder(self.selected_pdf)
@@ -1739,6 +1619,12 @@ class AutoOCRApp:
 
     def log(self, text: str):
         self.log_queue.put(text)
+
+    # --------------------------------------------------------
+
+    def report_step(self, text: str):
+        self.log(text)
+        self.status_queue.put(text)
 
     # --------------------------------------------------------
 
@@ -1769,7 +1655,13 @@ class AutoOCRApp:
                 while True:
                     msg = self.log_queue.get_nowait()
                     self.append_log(msg)
-                    self.set_status(msg)
+            except queue.Empty:
+                pass
+
+            try:
+                while True:
+                    status = self.status_queue.get_nowait()
+                    self.set_status(status)
             except queue.Empty:
                 pass
 
