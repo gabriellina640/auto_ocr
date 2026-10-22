@@ -8,6 +8,8 @@ The Windows one-file executable fails while importing PyMuPDF from the PyInstall
 
 The first packaging verification exposed a second dependency regression. Because `requirements.txt` allowed any PyMuPDF release, the Windows runner installed PyMuPDF 2.0 and its `pymupdf-layout` dependency. The generated executable then failed during import because the unused layout package expected `pymupdf/layout/resources/onnx/layout_rtf2.4.1+imf1.yaml` inside the one-file bundle. The application only uses PyMuPDF document APIs and has no layout-analysis feature.
 
+After pinning the dependency, the Windows build, dependency check and OCR smoke tests passed, but the packaged executable still returned exit code 1. Its `--windowed` bootloader suppressed the traceback in the non-interactive runner. PyInstaller documents that windowed Windows executables have no standard input, output or error streams. That both prevents diagnosis and can break libraries that use those streams.
+
 ## Decision
 
 Keep the `main` branch feature set unchanged and update only the Windows packaging path.
@@ -16,6 +18,8 @@ Keep the `main` branch feature set unchanged and update only the Windows packagi
 - Use PyInstaller's `--collect-all pymupdf` option to bundle PyMuPDF submodules, data and native binaries.
 - Pin PyMuPDF to `1.27.2.3`, the version already used by the project and without the unneeded PyMuPDF Layout dependency.
 - Verify in the Windows workflow that the exact pinned version is installed and that `pymupdf.layout` is absent before building the executable.
+- Preserve the `--windowed` bootloader so ordinary launches retain the existing no-console UX.
+- When importing any mandatory runtime dependency or running `--verify-bundle` fails, best-effort write its Python traceback to `autoocr-bundle-verification-error.log`; the workflow prints that file before failing the job without replacing the original exception.
 - Add a headless `--verify-bundle` command that creates and serializes an in-memory PDF. It exits before Tkinter starts.
 - Run the command against `dist\\AutoOCRPDF.exe` after PyInstaller completes in GitHub Actions. A failed import or missing library will fail the workflow and prevent artifact upload.
 

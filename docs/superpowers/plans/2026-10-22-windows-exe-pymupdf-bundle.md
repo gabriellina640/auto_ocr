@@ -276,3 +276,92 @@ Expected: PASS with all tests green.
 Run: push the integrated `main` branch and run `Build Windows EXE`.
 
 Expected: the dependency check reports `PyMuPDF 1.27.2.3`, the packaged bundle verification exits with code 0, and the EXE artifact uploads.
+
+### Task 6: Record packaged verification errors without changing the GUI bootloader
+
+**Files:**
+- Modify: `tests/test_bundle_verification.py`
+- Modify: `tests/test_build_workflow.py`
+- Modify: `app.py`
+- Modify: `.github/workflows/build-windows-exe.yml`
+
+- [x] **Step 1: Write failing error-reporting tests**
+
+```python
+    def test_main_writes_bundle_error_log_when_verification_fails(self):
+        error = RuntimeError("PyMuPDF verification failed")
+
+        with TemporaryDirectory() as temporary_directory:
+            with (
+                patch.object(app, "verify_pymupdf_bundle", side_effect=error),
+                patch.object(app.sys, "argv", ["app.py", "--verify-bundle"]),
+                patch.object(app.Path, "cwd", return_value=Path(temporary_directory)),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PyMuPDF verification failed"):
+                    app.main()
+
+            error_log = Path(temporary_directory) / app.BUNDLE_VERIFICATION_ERROR_LOG
+            self.assertIn("RuntimeError: PyMuPDF verification failed", error_log.read_text())
+```
+
+```python
+    def test_dependency_loader_writes_bundle_error_log_when_import_fails(self):
+        error = RuntimeError("PyMuPDF import failed")
+
+        with TemporaryDirectory() as temporary_directory:
+            with (
+                patch.object(
+                    app,
+                    "load_application_dependencies",
+                    side_effect=error,
+                    create=True,
+                ),
+                patch.object(app.sys, "argv", ["app.py", "--verify-bundle"]),
+                patch.object(app.Path, "cwd", return_value=Path(temporary_directory)),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PyMuPDF import failed"):
+                    app.load_application_dependencies_with_bundle_diagnostics()
+
+            error_log = Path(temporary_directory) / app.BUNDLE_VERIFICATION_ERROR_LOG
+            self.assertIn("RuntimeError: PyMuPDF import failed", error_log.read_text())
+
+    def test_main_preserves_verification_error_when_error_logging_fails(self):
+        error = RuntimeError("PyMuPDF verification failed")
+
+        with (
+            patch.object(app, "verify_pymupdf_bundle", side_effect=error),
+            patch.object(app.sys, "argv", ["app.py", "--verify-bundle"]),
+            patch.object(app.traceback, "format_exc", side_effect=RuntimeError("Unable to write")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PyMuPDF verification failed"):
+                app.main()
+```
+
+```python
+    def test_preserves_windowed_build_and_prints_bundle_error_log(self):
+        self.assertIn("--windowed `", self.workflow)
+        self.assertIn("autoocr-bundle-verification-error.log", self.workflow)
+        self.assertIn("Get-Content $errorLog", self.workflow)
+```
+
+- [x] **Step 2: Run the tests to verify they fail**
+
+Run: `venv/bin/python -m unittest tests.test_bundle_verification tests.test_build_workflow -v`
+
+Expected: FAIL because the command does not write an error log and the workflow uses the temporary console bootloader experiment.
+
+- [x] **Step 3: Restore the windowed bootloader and write failure diagnostics**
+
+Define `BUNDLE_VERIFICATION_ERROR_LOG = "autoocr-bundle-verification-error.log"` before importing runtime dependencies. Load Tkinter, PyMuPDF, Tesseract, Pillow and pypdf through one guarded loader. On a mandatory import error while `--verify-bundle` is requested, and on an exception from `verify_pymupdf_bundle()`, best-effort write `traceback.format_exc()` to that file and re-raise the original error. Restore `--windowed` in the production build and print the log in PowerShell before throwing the workflow failure.
+
+- [x] **Step 4: Re-run focused tests**
+
+Run: `venv/bin/python -m unittest tests.test_bundle_verification tests.test_build_workflow -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Validate the diagnostic run on Windows**
+
+Run: push the updated `main` branch and run `Build Windows EXE`.
+
+Expected: either the packaged verification succeeds, or the workflow prints the exact Python traceback needed for the next root-cause fix while preserving the user-facing windowed EXE.

@@ -217,8 +217,13 @@ jobs:
       - name: Verify packaged EXE
         shell: pwsh
         run: |
+          $errorLog = "autoocr-bundle-verification-error.log"
+          Remove-Item $errorLog -Force -ErrorAction SilentlyContinue
           & .\dist\AutoOCRPDF.exe --verify-bundle
           if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $errorLog) {
+              Get-Content $errorLog
+            }
             throw "Packaged EXE failed the PyMuPDF bundle verification."
           }
 

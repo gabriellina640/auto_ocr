@@ -6,17 +6,73 @@ import tempfile
 import threading
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+BUNDLE_VERIFICATION_ERROR_LOG = "autoocr-bundle-verification-error.log"
 
-import pymupdf as fitz
-import pytesseract
-from PIL import Image
-from pypdf import PdfWriter, PdfReader
+
+def bundle_verification_requested() -> bool:
+    return "--verify-bundle" in sys.argv[1:]
+
+
+def write_bundle_verification_error() -> None:
+    try:
+        Path.cwd().joinpath(BUNDLE_VERIFICATION_ERROR_LOG).write_text(
+            traceback.format_exc(), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def load_application_dependencies():
+    import tkinter as tkinter
+    from tkinter import filedialog as tkinter_filedialog
+    from tkinter import messagebox as tkinter_messagebox
+    from tkinter import ttk as tkinter_ttk
+
+    import pymupdf as pymupdf
+    import pytesseract as pytesseract_module
+    from PIL import Image as pillow_image
+    from pypdf import PdfReader as pypdf_reader
+    from pypdf import PdfWriter as pypdf_writer
+
+    return (
+        tkinter,
+        tkinter_filedialog,
+        tkinter_messagebox,
+        tkinter_ttk,
+        pymupdf,
+        pytesseract_module,
+        pillow_image,
+        pypdf_writer,
+        pypdf_reader,
+    )
+
+
+def load_application_dependencies_with_bundle_diagnostics():
+    try:
+        return load_application_dependencies()
+    except Exception:
+        if bundle_verification_requested():
+            write_bundle_verification_error()
+        raise
+
+
+(
+    tk,
+    filedialog,
+    messagebox,
+    ttk,
+    fitz,
+    pytesseract,
+    Image,
+    PdfWriter,
+    PdfReader,
+) = load_application_dependencies_with_bundle_diagnostics()
+
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -1811,8 +1867,12 @@ class AutoOCRApp:
 # ============================================================
 
 def main() -> int:
-    if "--verify-bundle" in sys.argv[1:]:
-        return verify_pymupdf_bundle()
+    if bundle_verification_requested():
+        try:
+            return verify_pymupdf_bundle()
+        except Exception:
+            write_bundle_verification_error()
+            raise
 
     root = create_root_window()
     AutoOCRApp(root)

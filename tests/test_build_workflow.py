@@ -25,6 +25,11 @@ class WindowsBuildWorkflowTests(unittest.TestCase):
         self.assertIn('expected = "1.27.2.3"', self.workflow)
         self.assertIn('find_spec("pymupdf.layout") is not None', self.workflow)
 
+    def test_preserves_windowed_build_and_prints_bundle_error_log(self):
+        self.assertIn("--windowed `", self.workflow)
+        self.assertIn("autoocr-bundle-verification-error.log", self.workflow)
+        self.assertIn("Get-Content $errorLog", self.workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
