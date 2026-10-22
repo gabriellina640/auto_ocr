@@ -96,7 +96,7 @@ jobs:
           @'
           from pathlib import Path
           import shutil
-          import fitz
+          import pymupdf as fitz
           from PIL import Image, ImageDraw
           from pypdf import PdfReader
           import app
@@ -188,6 +188,7 @@ jobs:
             --windowed `
             --clean `
             --collect-all "tkinterdnd2" `
+            --collect-all "pymupdf" `
             --hidden-import "windnd" `
             --add-data "vendor\tesseract;vendor\tesseract" `
             --add-data "vendor\tessdata;vendor\tessdata" `
@@ -195,6 +196,14 @@ jobs:
 
           if (!(Test-Path "dist\AutoOCRPDF.exe")) {
             throw "dist\AutoOCRPDF.exe was not generated."
+          }
+
+      - name: Verify packaged EXE
+        shell: pwsh
+        run: |
+          & .\dist\AutoOCRPDF.exe --verify-bundle
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged EXE failed the PyMuPDF bundle verification."
           }
 
       - name: Upload EXE artifact

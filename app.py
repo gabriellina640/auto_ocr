@@ -13,7 +13,7 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import pytesseract
 from PIL import Image
 from pypdf import PdfWriter, PdfReader
@@ -159,6 +159,16 @@ def resource_base_dir() -> Path:
 
 def bundled_resource(*parts: str) -> Path:
     return resource_base_dir().joinpath(*parts)
+
+
+def verify_pymupdf_bundle() -> int:
+    document = fitz.open()
+    try:
+        document.new_page()
+        document.tobytes()
+    finally:
+        document.close()
+    return 0
 
 
 def open_file(path: Path):
@@ -1800,11 +1810,15 @@ class AutoOCRApp:
 # MAIN
 # ============================================================
 
-def main():
+def main() -> int:
+    if "--verify-bundle" in sys.argv[1:]:
+        return verify_pymupdf_bundle()
+
     root = create_root_window()
     AutoOCRApp(root)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
