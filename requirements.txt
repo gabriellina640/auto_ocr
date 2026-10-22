@@ -1,6 +1,6 @@
 pytesseract
 Pillow
-PyMuPDF
+PyMuPDF==1.27.2.3
 pypdf
 tkinterdnd2
 windnd; platform_system == "Windows"

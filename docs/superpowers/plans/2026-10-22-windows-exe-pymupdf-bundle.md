@@ -203,3 +203,76 @@ Expected: no whitespace errors and only the planned changes.
 Run: push the branch and run `Build Windows EXE` in GitHub Actions.
 
 Expected: the `Verify packaged EXE` step exits with code 0 before the artifact is uploaded.
+
+### Task 5: Pin PyMuPDF and reject the unused layout dependency
+
+**Files:**
+- Modify: `tests/test_build_workflow.py`
+- Modify: `requirements.txt`
+- Modify: `.github/workflows/build-windows-exe.yml`
+
+- [x] **Step 1: Write failing dependency-contract tests**
+
+```python
+    def test_pins_the_known_compatible_pymupdf_version(self):
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn("PyMuPDF==1.27.2.3", requirements.splitlines())
+
+    def test_rejects_the_unneeded_pymupdf_layout_dependency(self):
+        self.assertIn('expected = "1.27.2.3"', self.workflow)
+        self.assertIn('find_spec("pymupdf.layout") is not None', self.workflow)
+```
+
+- [x] **Step 2: Run the tests to verify they fail**
+
+Run: `venv/bin/python -m unittest tests.test_build_workflow -v`
+
+Expected: FAIL because PyMuPDF is not pinned and the workflow does not verify the dependency set.
+
+- [x] **Step 3: Pin and verify the runtime dependency**
+
+Replace the unpinned requirement with:
+
+```text
+PyMuPDF==1.27.2.3
+```
+
+Add this workflow step immediately after dependency installation:
+
+```yaml
+      - name: Verify PyMuPDF dependency set
+        shell: pwsh
+        run: |
+          @'
+          import importlib.util
+          import pymupdf
+
+          expected = "1.27.2.3"
+          actual = pymupdf.version[0]
+          if actual != expected:
+              raise RuntimeError(f"Expected PyMuPDF {expected}, got {actual}.")
+          if importlib.util.find_spec("pymupdf.layout") is not None:
+              raise RuntimeError("PyMuPDF Layout must not be included in the application build.")
+          print(f"PyMuPDF {actual} verified without PyMuPDF Layout.")
+          '@ | python
+```
+
+- [x] **Step 4: Re-run the dependency-contract tests**
+
+Run: `venv/bin/python -m unittest tests.test_build_workflow -v`
+
+Expected: PASS.
+
+- [x] **Step 5: Run the full validation suite**
+
+Run: `venv/bin/python -m unittest discover -s tests -v`
+
+Expected: PASS with all tests green.
+
+- [ ] **Step 6: Validate the Windows artifact through GitHub Actions**
+
+Run: push the integrated `main` branch and run `Build Windows EXE`.
+
+Expected: the dependency check reports `PyMuPDF 1.27.2.3`, the packaged bundle verification exits with code 0, and the EXE artifact uploads.
