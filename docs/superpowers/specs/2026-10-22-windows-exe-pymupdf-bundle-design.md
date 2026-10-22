@@ -20,6 +20,7 @@ Keep the `main` branch feature set unchanged and update only the Windows packagi
 - Verify in the Windows workflow that the exact pinned version is installed and that `pymupdf.layout` is absent before building the executable.
 - Preserve the `--windowed` bootloader so ordinary launches retain the existing no-console UX.
 - When importing any mandatory runtime dependency or running `--verify-bundle` fails, best-effort write its Python traceback to `autoocr-bundle-verification-error.log`; the workflow prints that file before failing the job without replacing the original exception.
+- Add a PyInstaller runtime hook that redirects standard error to that same file only for `--verify-bundle`. Runtime hooks run before `app.py`, so errors that prevent the application module from loading are also observable without changing the production executable from `--windowed`.
 - Add a headless `--verify-bundle` command that creates and serializes an in-memory PDF. It exits before Tkinter starts.
 - Run the command against `dist\\AutoOCRPDF.exe` after PyInstaller completes in GitHub Actions. A failed import or missing library will fail the workflow and prevent artifact upload.
 

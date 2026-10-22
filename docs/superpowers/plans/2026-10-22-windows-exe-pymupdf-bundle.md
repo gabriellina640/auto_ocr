@@ -365,3 +365,37 @@ Expected: PASS.
 Run: push the updated `main` branch and run `Build Windows EXE`.
 
 Expected: either the packaged verification succeeds, or the workflow prints the exact Python traceback needed for the next root-cause fix while preserving the user-facing windowed EXE.
+
+### Task 7: Capture failures before the application module starts
+
+**Files:**
+- Create: `runtime_hooks/bundle_verification_diagnostics.py`
+- Create: `tests/test_runtime_bundle_diagnostics.py`
+- Modify: `tests/test_build_workflow.py`
+- Modify: `.github/workflows/build-windows-exe.yml`
+
+- [x] **Step 1: Write failing runtime-hook and workflow contract tests**
+
+Cover both `--verify-bundle` stream redirection and the requirement that the Windows build include the hook while staying `--windowed`.
+
+- [x] **Step 2: Run the tests to verify they fail**
+
+Run: `venv/bin/python -m unittest tests.test_runtime_bundle_diagnostics tests.test_build_workflow -v`
+
+Expected: FAIL because no runtime hook exists and the build does not reference it.
+
+- [x] **Step 3: Add the conditional runtime hook and include it in PyInstaller**
+
+The hook must only replace standard streams when `--verify-bundle` is present, writing to `autoocr-bundle-verification-error.log`. Add its source directory to the workflow path filter so edits trigger a new Windows build.
+
+- [x] **Step 4: Re-run focused tests and build a local frozen executable**
+
+Run: `venv/bin/python -m unittest tests.test_runtime_bundle_diagnostics tests.test_build_workflow -v`
+
+Expected: PASS, and local PyInstaller output reports that it included the custom runtime hook.
+
+- [ ] **Step 5: Validate the early-error diagnostic on Windows**
+
+Run: push the updated `main` branch and run `Build Windows EXE`.
+
+Expected: either `Verify packaged EXE` succeeds, or its log includes the exception emitted before `app.py` can write diagnostics.

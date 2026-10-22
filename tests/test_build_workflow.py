@@ -27,6 +27,11 @@ class WindowsBuildWorkflowTests(unittest.TestCase):
 
     def test_preserves_windowed_build_and_prints_bundle_error_log(self):
         self.assertIn("--windowed `", self.workflow)
+        self.assertIn('"runtime_hooks/**"', self.workflow)
+        self.assertIn(
+            '--runtime-hook "runtime_hooks/bundle_verification_diagnostics.py"',
+            self.workflow,
+        )
         self.assertIn("autoocr-bundle-verification-error.log", self.workflow)
         self.assertIn("Get-Content $errorLog", self.workflow)
 

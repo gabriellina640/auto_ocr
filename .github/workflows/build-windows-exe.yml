@@ -9,6 +9,7 @@ on:
     paths:
       - "app.py"
       - "requirements.txt"
+      - "runtime_hooks/**"
       - ".github/workflows/build-windows-exe.yml"
 
 jobs:
@@ -202,6 +203,7 @@ jobs:
             --name "AutoOCRPDF" `
             --onefile `
             --windowed `
+            --runtime-hook "runtime_hooks/bundle_verification_diagnostics.py" `
             --clean `
             --collect-all "tkinterdnd2" `
             --collect-all "pymupdf" `
