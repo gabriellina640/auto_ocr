@@ -13,7 +13,11 @@ class WindowsBuildWorkflowTests(unittest.TestCase):
         self.assertIn('--collect-all "pymupdf"', self.workflow)
 
     def test_runs_the_packaged_bundle_check(self):
-        self.assertIn('& .\\dist\\AutoOCRPDF.exe --verify-bundle', self.workflow)
+        verification = self.workflow.split('- name: Verify packaged EXE', 1)[1]
+        self.assertIn('Start-Process -FilePath ".\\dist\\AutoOCRPDF.exe"', verification)
+        self.assertIn('-ArgumentList "--verify-bundle" -Wait -PassThru', verification)
+        self.assertIn('$verificationProcess.ExitCode -ne 0', verification)
+        self.assertNotIn('$LASTEXITCODE', verification)
 
     def test_pins_the_known_compatible_pymupdf_version(self):
         root = Path(__file__).resolve().parents[1]

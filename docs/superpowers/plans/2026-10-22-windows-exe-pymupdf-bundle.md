@@ -1,5 +1,11 @@
 # Windows EXE PyMuPDF Bundle Implementation Plan
 
+### Task 8: Wait for the windowed verification process
+
+- [x] Add a failing workflow regression test requiring `Start-Process -Wait -PassThru` and the process `ExitCode`.
+- [x] Replace the direct invocation and unset `$LASTEXITCODE` check; retain the windowed executable and set a three-minute step timeout.
+- [ ] Run the suite and independent review, then commit on main and validate the actual Windows artifact.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prevent `AutoOCRPDF.exe` from failing at startup when PyMuPDF files are absent from its one-file bundle.

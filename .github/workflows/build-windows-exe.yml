@@ -217,12 +217,14 @@ jobs:
           }
 
       - name: Verify packaged EXE
+        timeout-minutes: 3
         shell: pwsh
         run: |
           $errorLog = "autoocr-bundle-verification-error.log"
           Remove-Item $errorLog -Force -ErrorAction SilentlyContinue
-          & .\dist\AutoOCRPDF.exe --verify-bundle
-          if ($LASTEXITCODE -ne 0) {
+          $verificationProcess = Start-Process -FilePath ".\dist\AutoOCRPDF.exe" -ArgumentList "--verify-bundle" -Wait -PassThru
+          Write-Host "Packaged EXE verification exit code: $($verificationProcess.ExitCode)"
+          if ($verificationProcess.ExitCode -ne 0) {
             if (Test-Path $errorLog) {
               Get-Content $errorLog
             }

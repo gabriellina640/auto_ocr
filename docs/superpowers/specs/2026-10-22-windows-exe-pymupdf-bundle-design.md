@@ -39,6 +39,8 @@ Excluded:
 
 ## Validation
 
+The Windows verification must use `Start-Process -Wait -PassThru` and inspect the returned process `ExitCode`. Direct invocation of the windowed executable can return before completion and leave `$LASTEXITCODE` unset, producing a false workflow failure. The verification step has a three-minute timeout.
+
 - Run the focused unit tests before and after implementation.
 - Run the complete existing unit test suite.
 - Run Python bytecode compilation for modified Python files.
