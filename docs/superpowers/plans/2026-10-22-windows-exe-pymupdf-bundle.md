@@ -4,7 +4,9 @@
 
 - [x] Add a failing workflow regression test requiring `Start-Process -Wait -PassThru` and the process `ExitCode`.
 - [x] Replace the direct invocation and unset `$LASTEXITCODE` check; retain the windowed executable and set a three-minute step timeout.
-- [ ] Run the suite and independent review, then commit on main and validate the actual Windows artifact.
+- [x] Run the suite and independent review, then commit on main and validate the actual Windows artifact.
+
+Validation evidence: all 21 local tests passed and independent review found no defects. Windows Actions run [39846016241](https://github.com/gabriellina640/auto_ocr/actions/runs/39846016241), commit `58b5bb9`, passed every step, including OCR smoke tests and the actual windowed executable verification (`ExitCode: 0`). Artifact `AutoOCRPDF-Windows` uploaded successfully. The interactive GUI was not manually exercised on a Windows desktop.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -204,7 +206,7 @@ Run: `git diff --check && git diff -- app.py tests/test_bundle_verification.py t
 
 Expected: no whitespace errors and only the planned changes.
 
-- [ ] **Step 4: Validate the final Windows artifact**
+- [x] **Step 4: Validate the final Windows artifact**
 
 Run: push the branch and run `Build Windows EXE` in GitHub Actions.
 
@@ -277,7 +279,7 @@ Run: `venv/bin/python -m unittest discover -s tests -v`
 
 Expected: PASS with all tests green.
 
-- [ ] **Step 6: Validate the Windows artifact through GitHub Actions**
+- [x] **Step 6: Validate the Windows artifact through GitHub Actions**
 
 Run: push the integrated `main` branch and run `Build Windows EXE`.
 
@@ -366,7 +368,7 @@ Run: `venv/bin/python -m unittest tests.test_bundle_verification tests.test_buil
 
 Expected: PASS.
 
-- [ ] **Step 5: Validate the diagnostic run on Windows**
+- [x] **Step 5: Validate the diagnostic run on Windows**
 
 Run: push the updated `main` branch and run `Build Windows EXE`.
 
@@ -400,7 +402,7 @@ Run: `venv/bin/python -m unittest tests.test_runtime_bundle_diagnostics tests.te
 
 Expected: PASS, and local PyInstaller output reports that it included the custom runtime hook.
 
-- [ ] **Step 5: Validate the early-error diagnostic on Windows**
+- [x] **Step 5: Validate the early-error diagnostic on Windows**
 
 Run: push the updated `main` branch and run `Build Windows EXE`.
 
